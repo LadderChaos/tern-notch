@@ -6,7 +6,7 @@ See your Claude Code, Codex, and OpenCode sessions live — tool calls, token us
 
 ## Screenshots
 
-<!-- TODO: add screenshots -->
+![notchHUD open view](assets/screenshot-open.png)
 
 ## Features
 
