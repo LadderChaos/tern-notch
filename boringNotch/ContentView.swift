@@ -110,13 +110,12 @@ struct ContentView: View {
                     )
                     .padding([.horizontal, .bottom], vm.notchState == .open ? 12 : 0)
                     .background {
-                        if vm.notchState == .open {
-                            ZStack {
+                        ZStack {
+                            Color.black
+                            if vm.notchState == .open {
                                 VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
                                 Color.black.opacity(0.5)
                             }
-                        } else {
-                            Color.black
                         }
                     }
                     .clipShape(currentNotchShape)

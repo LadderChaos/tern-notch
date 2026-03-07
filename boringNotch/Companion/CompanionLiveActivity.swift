@@ -16,7 +16,7 @@ struct CompanionCompactView: View {
     var body: some View {
         Rectangle()
             .fill(.black)
-            .frame(width: vm.closedNotchSize.width, height: vm.effectiveClosedNotchHeight)
+            .frame(width: vm.closedNotchSize.width - 20, height: vm.effectiveClosedNotchHeight)
             .overlay(alignment: .bottom) {
                 if !manager.sessions.isEmpty {
                     CompanionSessionDots()

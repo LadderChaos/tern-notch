@@ -27,6 +27,9 @@ Carthage/
 # macOS
 .DS_Store
 
+# MCP
+.mcp_data/
+
 # SwiftLint
 .swiftlint.yml
 
