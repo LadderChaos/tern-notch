@@ -27,3 +27,17 @@
 - **Context**: "Notch Companion" was generic and didn't convey the HUD nature of the app.
 - **Decision**: Rename to "notchHUD" — app name, repo, folder, all references.
 - **Consequences**: GitHub repo URL changed. Old links broken (GitHub auto-redirects). Clearer branding.
+
+## ADR-005: Apple Intelligence-style glow instead of rotating gradient
+- **Date**: 2026-03-07
+- **Status**: Accepted
+- **Context**: Original flowing light (流光) used a rotating AngularGradient which had persistent positioning issues — gaps between glow and notch edge, clipping problems with padding/masks.
+- **Decision**: Rewrite using Apple Intelligence-style approach: multiple layered strokes (3 layers with increasing blur), randomized gradient stop positions updated every 0.4s with easing animations. No padding or drawingGroup needed.
+- **Consequences**: Organic pulsing glow that naturally extends from shape edges. No positioning hacks. Closed notch gets animated glow; open notch gets static agent-colored border on permission cards.
+
+## ADR-006: Translucent background with black base layer
+- **Date**: 2026-03-07
+- **Status**: Accepted
+- **Context**: Added VisualEffectView for translucent open notch, but instant background switch from black to translucent caused a rectangular flash during open/close animation.
+- **Decision**: Always render `Color.black` as base layer, overlay translucent layers on top when open.
+- **Consequences**: Smooth animation transitions. Black base blends with physical notch during shape transition.
