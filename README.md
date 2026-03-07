@@ -33,7 +33,11 @@ See your Claude Code, Codex, and OpenCode sessions live — tool calls, token us
 
 Download the latest pre-built `notchHUD.app` from [GitHub Releases](https://github.com/LadderChaos/notchhud/releases). Unzip, drag to Applications, and run.
 
-> **Note:** The app is not notarized. On first launch, right-click → Open (or go to System Settings → Privacy & Security → Open Anyway).
+> **Note:** The app is not notarized. On macOS Sequoia (15+), you need to remove the quarantine flag before first launch:
+> ```bash
+> xattr -cr /Applications/notchHUD.app
+> ```
+> On older macOS versions, right-click → Open (or System Settings → Privacy & Security → Open Anyway).
 
 ### Build from Source
 
