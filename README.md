@@ -1,4 +1,4 @@
-# Notch Companion
+# notchHUD
 
 A fork of [boring.notch](https://github.com/TheBoredTeam/boring.notch) that adds real-time AI coding agent monitoring to the MacBook notch.
 
@@ -39,7 +39,7 @@ open boringNotch.xcodeproj
 
 ### Usage
 
-Just run the app and start your AI coding sessions. Notch Companion auto-detects sessions from `~/.claude/` — no configuration needed.
+Just run the app and start your AI coding sessions. notchHUD auto-detects sessions from `~/.claude/` — no configuration needed.
 
 Click the notch to expand and see full session details. The companion shows:
 - Project name and git branch

@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleName</key>
-	<string>Notch Companion</string>
+	<string>notchHUD</string>
 	<key>CFBundleDisplayName</key>
-	<string>Notch Companion</string>
+	<string>notchHUD</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>

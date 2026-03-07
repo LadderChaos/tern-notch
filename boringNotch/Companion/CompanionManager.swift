@@ -47,6 +47,13 @@ final class CompanionManager: ObservableObject {
     /// True if there are any active sessions (for showing Claude tab indicator)
     var hasAnySessions: Bool { !sessions.isEmpty }
 
+    /// Dominant agent type for glow color (priority: active session, then first session)
+    var dominantAgentType: AgentType {
+        sessions.first { $0.state.isActive }?.session.agentType
+            ?? sessions.first?.session.agentType
+            ?? .claude
+    }
+
     /// True if any session is actively working
     var hasAnyActivity: Bool {
         sessions.contains { $0.state.isActive || $0.state.needsPermission }
@@ -88,8 +95,8 @@ final class CompanionManager: ObservableObject {
         let line = "[\(Date())] \(msg)\n"
         // Try multiple locations
         let paths = [
-            NSTemporaryDirectory() + "notch-companion-debug.log",
-            "/tmp/notch-companion-debug.log",
+            NSTemporaryDirectory() + "notchhud-debug.log",
+            "/tmp/notchhud-debug.log",
             FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".notch-debug.log").path
         ]
         for logFile in paths {
@@ -665,6 +672,10 @@ final class CompanionManager: ObservableObject {
             let parts = result.components(separatedBy: "|")
             if let cwd = parts.first, !cwd.isEmpty {
                 updateState(for: sessionId) { $0.cwd = cwd }
+                // Get git branch from the working directory
+                if let branch = getGitBranch(at: cwd) {
+                    updateState(for: sessionId) { $0.gitBranch = branch }
+                }
             }
             // Parse permission JSON to derive a mode label
             if parts.count >= 2 {
@@ -676,6 +687,18 @@ final class CompanionManager: ObservableObject {
                 }
             }
         }
+    }
+
+    private func getGitBranch(at directory: String) -> String? {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        proc.arguments = ["-C", directory, "branch", "--show-current"]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = Pipe()
+        do { try proc.run(); proc.waitUntilExit() } catch { return nil }
+        let result = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (result?.isEmpty ?? true) ? nil : result
     }
 
     /// Run a sqlite3 query and return trimmed output

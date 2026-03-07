@@ -50,6 +50,14 @@ struct ContentView: View {
                 : cornerRadiusInsets.closed.top
     }
 
+    private func glowColor(for agent: AgentType) -> Color {
+        switch agent {
+        case .claude: return .orange
+        case .opencode: return .green
+        case .codex: return .blue
+        }
+    }
+
     private var currentNotchShape: NotchShape {
         NotchShape(
             topCornerRadius: topCornerRadius,
@@ -101,7 +109,16 @@ struct ContentView: View {
                         : cornerRadiusInsets.closed.bottom
                     )
                     .padding([.horizontal, .bottom], vm.notchState == .open ? 12 : 0)
-                    .background(.black)
+                    .background {
+                        if vm.notchState == .open {
+                            ZStack {
+                                VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
+                                Color.black.opacity(0.5)
+                            }
+                        } else {
+                            Color.black
+                        }
+                    }
                     .clipShape(currentNotchShape)
                     .overlay(alignment: .top) {
                         Rectangle()
@@ -112,9 +129,9 @@ struct ContentView: View {
                     .overlay {
                         // Flowing light effect around notch when Claude needs attention
                         if Defaults[.enableClaudeCode] && companionManager.anyNeedsPermission {
-                            NotchFlowingLight(shape: currentNotchShape)
-                        } else if Defaults[.enableClaudeCode] && companionManager.hasAnyActivity && vm.notchState == .closed {
-                            NotchActivityGlow(shape: currentNotchShape)
+                            NotchFlowingLight(shape: currentNotchShape, color: glowColor(for: companionManager.dominantAgentType))
+                                .drawingGroup()
+                                .padding(-6)
                         }
                     }
                     .shadow(

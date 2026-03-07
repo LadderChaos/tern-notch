@@ -841,19 +841,13 @@ struct About: View {
             Form {
                 Section {
                     HStack {
-                        Text("Release name")
-                        Spacer()
-                        Text(Defaults[.releaseName])
-                            .foregroundStyle(.secondary)
-                    }
-                    HStack {
                         Text("Version")
                         Spacer()
                         if showBuildNumber {
                             Text("(\(Bundle.main.buildVersionNumber ?? ""))")
                                 .foregroundStyle(.secondary)
                         }
-                        Text(Bundle.main.releaseVersionNumber ?? "unkown")
+                        Text(Bundle.main.releaseVersionNumber ?? "unknown")
                             .foregroundStyle(.secondary)
                     }
                     .onTapGesture {
@@ -862,13 +856,41 @@ struct About: View {
                         }
                     }
                 } header: {
-                    Text("Version info")
+                    Text("notchHUD")
                 }
 
-                UpdaterSettingsView(updater: updaterController.updater)
+                Section {
+                    Text("notchHUD adds real-time AI coding agent monitoring to the MacBook notch. See your Claude Code, Codex, and OpenCode sessions live — tool calls, token usage, context window, git branch, and permission requests.")
+                        .foregroundStyle(.secondary)
+                        .font(.callout)
+                } header: {
+                    Text("About notchHUD")
+                }
+
+                Section {
+                    Text("Built on [boring.notch](https://github.com/TheBoredTeam/boring.notch) by TheBoredTeam. The AI companion feature was written by the maintainers of this fork.")
+                        .foregroundStyle(.secondary)
+                        .font(.callout)
+                } header: {
+                    Text("Acknowledgements")
+                }
 
                 HStack(spacing: 30) {
                     Spacer(minLength: 0)
+                    Button {
+                        if let url = URL(string: "https://github.com/LadderChaos/notchhud") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    } label: {
+                        VStack(spacing: 5) {
+                            Image("Github")
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .frame(width: 18)
+                            Text("notchHUD")
+                        }
+                        .contentShape(Rectangle())
+                    }
                     Button {
                         if let url = URL(string: "https://github.com/TheBoredTeam/boring.notch") {
                             NSWorkspace.shared.open(url)
@@ -879,7 +901,7 @@ struct About: View {
                                 .resizable()
                                 .aspectRatio(contentMode: .fit)
                                 .frame(width: 18)
-                            Text("GitHub")
+                            Text("boring.notch")
                         }
                         .contentShape(Rectangle())
                     }
@@ -889,7 +911,7 @@ struct About: View {
             }
             VStack(spacing: 0) {
                 Divider()
-                Text("Made with 🫶🏻 by not so boring not.people")
+                Text("notchHUD — a fork of boring.notch")
                     .foregroundStyle(.secondary)
                     .padding(.top, 5)
                     .padding(.bottom, 7)
@@ -897,13 +919,6 @@ struct About: View {
                     .padding(.horizontal, 10)
             }
             .frame(maxWidth: .infinity, alignment: .center)
-        }
-        .toolbar {
-            //            Button("Welcome window") {
-            //                openWindow(id: "onboarding")
-            //            }
-            //            .controlSize(.extraLarge)
-            CheckForUpdatesView(updater: updaterController.updater)
         }
         .navigationTitle("About")
     }

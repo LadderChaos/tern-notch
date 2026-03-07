@@ -11,7 +11,18 @@ import SwiftUI
 /// Flowing light that traces the notch border — skips the top (hidden by notch)
 struct NotchFlowingLight: View {
     let shape: NotchShape
+    let color: Color
     @State private var phase: CGFloat = 0
+
+    private var highlightColor: Color {
+        // Complementary lighter shade for the gradient peak
+        switch color {
+        case .orange: return .yellow
+        case .green: return .mint
+        case .blue: return .cyan
+        default: return color.opacity(0.6)
+        }
+    }
 
     var body: some View {
         ZStack {
@@ -20,12 +31,12 @@ struct NotchFlowingLight: View {
                     AngularGradient(
                         gradient: Gradient(colors: [
                             .clear, .clear, .clear,
-                            .orange.opacity(0.8),
-                            .yellow.opacity(0.6),
-                            .orange.opacity(0.8),
+                            color.opacity(0.8),
+                            highlightColor.opacity(0.6),
+                            color.opacity(0.8),
                             .clear, .clear, .clear
                         ]),
-                        center: .top,
+                        center: .center,
                         startAngle: .degrees(phase),
                         endAngle: .degrees(phase + 360)
                     ),
@@ -39,25 +50,16 @@ struct NotchFlowingLight: View {
                     AngularGradient(
                         gradient: Gradient(colors: [
                             .clear, .clear, .clear, .clear,
-                            .orange.opacity(0.5),
+                            color.opacity(0.5),
                             .clear, .clear, .clear, .clear
                         ]),
-                        center: .top,
+                        center: .center,
                         startAngle: .degrees(phase),
                         endAngle: .degrees(phase + 360)
                     ),
                     lineWidth: 1
                 )
         }
-        // Mask out the top edge — it's behind the notch anyway
-        .mask(
-            VStack(spacing: 0) {
-                Color.clear.frame(height: 4)
-                LinearGradient(colors: [.clear, .white], startPoint: .top, endPoint: .bottom)
-                    .frame(height: 6)
-                Color.white
-            }
-        )
         .onAppear {
             withAnimation(.linear(duration: 2.0).repeatForever(autoreverses: false)) {
                 phase = 360
@@ -67,28 +69,26 @@ struct NotchFlowingLight: View {
     }
 }
 
-/// Subtle static glow when sessions are active (not needing attention)
+/// Subtle grey glow indicating app is running (sessions exist)
 struct NotchActivityGlow: View {
     let shape: NotchShape
-    @State private var glowOpacity: CGFloat = 0.15
+    @State private var glowOpacity: CGFloat = 0.2
 
     var body: some View {
-        shape
-            .stroke(Color.green.opacity(glowOpacity), lineWidth: 1)
-            .blur(radius: 1)
-            .mask(
-                VStack(spacing: 0) {
-                    Color.clear.frame(height: 4)
-                    LinearGradient(colors: [.clear, .white], startPoint: .top, endPoint: .bottom)
-                        .frame(height: 6)
-                    Color.white
-                }
-            )
-            .allowsHitTesting(false)
-            .onAppear {
-                withAnimation(.easeInOut(duration: 2.0).repeatForever(autoreverses: true)) {
-                    glowOpacity = 0.35
-                }
+        ZStack {
+            shape
+                .stroke(Color.white.opacity(glowOpacity * 0.4), lineWidth: 4)
+                .blur(radius: 4)
+
+            shape
+                .stroke(Color.white.opacity(glowOpacity), lineWidth: 1.5)
+                .blur(radius: 1)
+        }
+        .allowsHitTesting(false)
+        .onAppear {
+            withAnimation(.easeInOut(duration: 2.5).repeatForever(autoreverses: true)) {
+                glowOpacity = 0.45
             }
+        }
     }
 }

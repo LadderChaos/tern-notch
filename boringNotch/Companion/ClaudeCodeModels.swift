@@ -53,7 +53,7 @@ struct ClaudeSession: Identifiable, Equatable {
             return agentType.displayName
         }
 
-        // Project key is path with / replaced by - e.g. "-Users-danieltang-GitHub-notch-companion"
+        // Project key is path with / replaced by - e.g. "-Users-danieltang-GitHub-notchhud"
         let key = projectKey.hasPrefix("-") ? String(projectKey.dropFirst()) : projectKey
         let patterns = ["-GitHub-", "-Desktop-", "-Documents-", "-Projects-", "-projects-", "-code-", "-src-"]
         for pattern in patterns {
