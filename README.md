@@ -27,17 +27,29 @@ See your Claude Code, Codex, and OpenCode sessions live — tool calls, token us
 - Xcode 15+ (to build from source)
 - MacBook with notch (works on any Mac, but designed for notch)
 
-## Setup
+## Installation
 
-### Build & Run
+### Download (Recommended)
 
-Open in Xcode:
+Download the latest pre-built `notchHUD.app` from [GitHub Releases](https://github.com/LadderChaos/notchhud/releases). Unzip, drag to Applications, and run.
 
-```bash
-open boringNotch.xcodeproj
-```
+> **Note:** The app is not notarized. On first launch, right-click → Open (or go to System Settings → Privacy & Security → Open Anyway).
 
-### Usage
+### Build from Source
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/LadderChaos/notchhud.git
+   cd notchhud
+   ```
+2. Open in Xcode:
+   ```bash
+   open boringNotch.xcodeproj
+   ```
+3. Select your signing team in **Signing & Capabilities**.
+4. Build and run (`Cmd+R`).
+
+## Usage
 
 Just run the app and start your AI coding sessions. notchHUD auto-detects sessions from `~/.claude/` — no configuration needed.
 
