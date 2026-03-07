@@ -1,45 +1,25 @@
-# Claude Companion
+# Notch Companion
 
-A macOS notch companion app for **Claude Code** and **OpenAI Codex** — real-time visibility into your AI coding assistants, right in the MacBook notch.
+A fork of [boring.notch](https://github.com/TheBoredTeam/boring.notch) that adds real-time AI coding agent monitoring to the MacBook notch.
 
-Inspired by [boringnotch](https://github.com/TheBoredTeam/boring.notch) and [AgentNotch](https://github.com/AppGram/agentnotch).
-
-## Features
-
-- **4-Phase Pipeline** — Researching → Reasoning → Writing → Reviewing, each with colored progress bars
-- **Multi-Agent Support** — Claude Code (orange indicator) and Codex (blue indicator) with automatic source detection
-- **Tool Call Tracking** — See every tool call (web_search, code_exec, file_read) with counts and recency
-- **Live Metrics** — Token usage, latency, and model info updated in real-time
-- **Notch-Native** — Floats below the MacBook notch, zero screen real estate used
-- **OTLP Telemetry** — Receives telemetry via OpenTelemetry protocol (logs, metrics, traces)
+See your Claude Code, Codex, and OpenCode sessions live — tool calls, token usage, context window, git branch, and permission requests — all without leaving your editor.
 
 ## Screenshots
 
-The companion shows a stacked phase pipeline. Tap any phase to expand the detail panel with tool calls and metrics:
+<!-- TODO: add screenshots -->
 
-```
-┌──────────────────────────────────────────┐
-│ 🔍 Researching  ━━━━━━━━━━━━━━━━━  1/4  │
-├──────────────────────────────────────────┤
-│ 💬 Reasoning    ━━━━━━━━━━━━━━━━━  2/4  │
-│ ┌────────────────────────────────────┐   │
-│ │  🔍 Researching  💬 Reasoning     │   │
-│ │  ✏️ Writing      ⚙️ Reviewing     │   │
-│ │                                    │   │
-│ │  Tool Calls                        │   │
-│ │  web_search         x3  2s ago     │   │
-│ │  code_exec          x1  8s ago     │   │
-│ │  file_read          x5  just now   │   │
-│ │                                    │   │
-│ │  Tokens    Latency    Model        │   │
-│ │  19.800    143ms      Opus 4.6     │   │
-│ └────────────────────────────────────┘   │
-├──────────────────────────────────────────┤
-│ ✏️ Writing      ━━━━━━━━━━━━━━━━━  3/4  │
-├──────────────────────────────────────────┤
-│ ⚙️ Reviewing    ━━━━━━━━━━━━━━━━━  4/4  │
-└──────────────────────────────────────────┘
-```
+## Features
+
+**Everything in boring.notch, plus:**
+
+- **Multi-session monitoring** — auto-discovers all active Claude Code / Codex / OpenCode sessions via `~/.claude/` file watching
+- **Live tool tracking** — see active and recent tool calls (Bash, Read, Edit, Grep, etc.) with duration
+- **Token & context usage** — input/output tokens and context window percentage with color-coded bar
+- **Permission alerts** — notch glows orange when a session needs user approval
+- **Activity glow** — subtle green glow when agents are actively working
+- **Session cards** — two-up card layout showing project name, git branch, model, and permission mode
+- **Paginated sessions** — swipe horizontally when more than 2 sessions are active
+- **Zero config** — no OTLP setup needed, reads directly from Claude Code's local state files
 
 ## Requirements
 
@@ -49,83 +29,46 @@ The companion shows a stacked phase pipeline. Tap any phase to expand the detail
 
 ## Setup
 
-### 1. Build & Run
+### Build & Run
+
+Open in Xcode:
 
 ```bash
-cd apps/companion/ClaudeCompanion
-swift build
-swift run
+open boringNotch.xcodeproj
 ```
 
-Or open in Xcode:
-```bash
-open ClaudeCompanion/Package.swift
-```
+### Usage
 
-### 2. Connect Your AI Agent
+Just run the app and start your AI coding sessions. Notch Companion auto-detects sessions from `~/.claude/` — no configuration needed.
 
-Set the OTLP endpoint before starting your coding agent:
-
-```bash
-# For Claude Code
-export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"
-claude
-
-# For Codex
-export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"
-codex
-```
-
-The companion auto-detects the source from OTLP resource attributes (service name, model name) and shows the appropriate indicator color:
-- **Orange** — Claude Code
-- **Blue** — OpenAI Codex
-- **Light blue** — Unknown agent
-
-### 3. Menu Bar
-
-Click the brain icon (🧠) in the menu bar to:
-- Toggle companion visibility
-- Load demo data
-- Reset session
+Click the notch to expand and see full session details. The companion shows:
+- Project name and git branch
+- Model (Opus, Sonnet, etc.) and permission mode (YOLO, Auto, Ask, Plan)
+- Active/recent tool calls with duration
+- Input/output token counts and context window usage
+- Todo progress
 
 ## Architecture
 
+The Companion feature lives in `boringNotch/Companion/` and integrates into boring.notch's existing notch UI:
+
 ```
-Sources/
-├── App/
-│   ├── ClaudeCompanionApp.swift   # @main entry point
-│   ├── AppDelegate.swift          # Menu bar + window lifecycle
-│   └── NotchWindow.swift          # NSPanel positioned at notch
-├── Models/
-│   ├── AgentSource.swift          # Claude / Codex source detection
-│   ├── Phase.swift                # 4 phases with colors/icons
-│   ├── ToolCall.swift             # Tool call categories
-│   └── SessionMetrics.swift       # Tokens, latency, model, source
-├── Views/
-│   ├── CompanionNotchView.swift   # Main view (phase pipeline)
-│   ├── PhasePillView.swift        # Collapsed phase pill
-│   ├── PhaseTabBar.swift          # Tab bar in detail panel
-│   ├── DetailPanelView.swift      # Expanded detail panel
-│   ├── ToolCallsView.swift        # Tool call list
-│   ├── MetricsBar.swift           # Bottom metrics display
-│   └── SourceIndicator.swift     # Agent source dot + badge
-├── ViewModels/
-│   └── CompanionViewModel.swift   # State management + telemetry binding
-├── Telemetry/
-│   └── OTLPReceiver.swift         # HTTP server for OTLP/HTTP
-└── Theme/
-    └── CompanionTheme.swift       # Colors, spacing, animations
+boringNotch/Companion/
+  ClaudeCodeModels.swift    — Session, state, token, and tool models
+  CompanionManager.swift    — File-watching session discovery and JSONL parsing
+  CompanionView.swift       — Expanded session cards (two-up, paginated)
+  CompanionLiveActivity.swift — Compact collapsed view in the notch
+  NotchGlowEffect.swift     — Permission and activity glow effects
 ```
 
-## Phase Colors
-
-| Phase | Color | Hex |
-|-------|-------|-----|
-| Researching | Purple | `#7359D9` |
-| Reasoning | Pink | `#E6408C` |
-| Writing | Cyan | `#00D9D9` |
-| Reviewing | Orange/Amber | `#E6A626` |
+Integration points in boring.notch (~17 lines of glue code):
+- `enums/generic.swift` — added `claudeCode` view case
+- `models/Constants.swift` — added settings keys
+- `boringNotchApp.swift` — CompanionManager initialization
+- `ContentView.swift` — companion views in closed/open states
 
 ## License
 
-MIT
+This project is a derivative of [boring.notch](https://github.com/TheBoredTeam/boring.notch) and is licensed under the [GNU General Public License v3.0](LICENSE).
+
+The Companion feature (`boringNotch/Companion/`) was written by the maintainers of this fork.
