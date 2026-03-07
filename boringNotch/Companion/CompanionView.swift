@@ -62,6 +62,7 @@ struct CompanionView: View {
                             Color.clear
                         }
                     }
+                    .padding(.horizontal, 6)
                     .containerRelativeFrame(.horizontal)
                 }
             }
@@ -110,6 +111,12 @@ struct SessionCardView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .background(agentBackground)
+        .overlay {
+            if s.needsPermission {
+                RoundedRectangle(cornerRadius: 16)
+                    .strokeBorder(agentBackgroundColor.opacity(0.6), lineWidth: 1.5)
+            }
+        }
     }
 
     private var agentBackground: some View {

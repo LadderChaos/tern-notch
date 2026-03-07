@@ -126,11 +126,9 @@ struct ContentView: View {
                             .padding(.horizontal, topCornerRadius)
                     }
                     .overlay {
-                        // Flowing light effect around notch when Claude needs attention
-                        if Defaults[.enableClaudeCode] && companionManager.anyNeedsPermission {
+                        // Flowing light effect around notch when closed and needs attention
+                        if vm.notchState != .open && Defaults[.enableClaudeCode] && companionManager.anyNeedsPermission {
                             NotchFlowingLight(shape: currentNotchShape, color: glowColor(for: companionManager.dominantAgentType))
-                                .drawingGroup()
-                                .padding(-6)
                         }
                     }
                     .shadow(
