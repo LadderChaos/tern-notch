@@ -53,8 +53,8 @@ struct ContentView: View {
     private func glowColor(for agent: AgentType) -> Color {
         switch agent {
         case .claude: return .orange
-        case .opencode: return .green
-        case .codex: return .blue
+        case .codex: return .green
+        case .opencode: return .blue
         }
     }
 

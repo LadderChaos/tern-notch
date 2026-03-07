@@ -31,7 +31,7 @@ struct ClaudeSession: Identifiable, Equatable {
     let id: String
 
     /// The project directory key under ~/.claude/projects/
-    let projectKey: String
+    var projectKey: String
 
     /// Full path to the JSONL file being watched
     let jsonlPath: String
@@ -98,16 +98,17 @@ struct TokenUsage: Equatable {
     /// Tokens currently in context window (latest request's input + cache_read + output)
     var contextTokens: Int = 0
 
+    /// Context window size (default 200k for Claude, can be overridden per-agent)
+    var contextWindow: Int = 200_000
+
     var totalTokens: Int {
         inputTokens + outputTokens + cacheReadInputTokens + cacheCreationInputTokens
     }
 
-    static let contextWindow = 200_000
-
     var contextPercentage: Double {
-        guard Self.contextWindow > 0 else { return 0 }
+        guard contextWindow > 0 else { return 0 }
         let used = contextTokens > 0 ? contextTokens : (inputTokens + cacheReadInputTokens + outputTokens)
-        return min(100, Double(used) / Double(Self.contextWindow) * 100)
+        return min(100, Double(used) / Double(contextWindow) * 100)
     }
 }
 

@@ -162,7 +162,7 @@ struct SessionCardView: View {
                 if !s.permissionMode.isEmpty {
                     badgeView(
                         modeLabel(s.permissionMode),
-                        color: s.permissionMode == "bypassPermissions" ? .green : .orange
+                        color: modeBadgeColor(s.permissionMode)
                     )
                 }
                 if !s.model.isEmpty {
@@ -306,6 +306,15 @@ struct SessionCardView: View {
             .background(Capsule().fill(color.opacity(0.1)))
     }
 
+    private func modeBadgeColor(_ mode: String) -> Color {
+        switch mode {
+        case "bypassPermissions": return .green
+        case "acceptEdits": return .cyan
+        case "plan": return .purple
+        default: return .white  // "default" mode and others — neutral, not warning
+        }
+    }
+
     private func modeLabel(_ mode: String) -> String {
         switch mode {
         case "bypassPermissions": return "YOLO"
@@ -323,8 +332,13 @@ struct SessionCardView: View {
         if m.contains("opus") { return "Opus" }
         if m.contains("sonnet") { return "Sonnet" }
         if m.contains("haiku") { return "Haiku" }
-        if m.contains("gpt-5") { return "GPT-5" }
-        if m.contains("gpt-4") { return "GPT-4" }
+        // GPT models: "gpt-5.4" → "5.4", "gpt-5.4-codex" → "5.4"
+        if m.hasPrefix("gpt-") {
+            let version = String(cleaned.dropFirst(4))  // drop "gpt-" or "GPT-"
+            // Strip suffixes like "-codex", "-mini", etc.
+            let base = version.components(separatedBy: "-").prefix(while: { $0.first?.isNumber == true }).joined(separator: ".")
+            return base.isEmpty ? cleaned : base
+        }
         if m.contains("gemini") { return "Gemini" }
         if m.contains("o3") || m.contains("o4") { return cleaned }
         if m.contains("deepseek") { return "DeepSeek" }

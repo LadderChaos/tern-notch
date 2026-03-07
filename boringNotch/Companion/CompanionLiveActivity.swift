@@ -44,9 +44,17 @@ struct SessionDotView: View {
     let info: CompanionManager.SessionInfo
     @State private var isBlinking = false
 
+    private var agentColor: Color {
+        switch info.session.agentType {
+        case .claude: return .orange
+        case .codex: return .green
+        case .opencode: return .blue
+        }
+    }
+
     private var dotColor: Color {
         if info.state.needsPermission { return .orange }
-        if info.state.isActive { return .green }
+        if info.state.isActive { return agentColor }
         return .gray
     }
 

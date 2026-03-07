@@ -35,7 +35,7 @@ final class CompanionManager: ObservableObject {
 
     /// Wrapper combining session identity with live state
     struct SessionInfo: Identifiable, Equatable {
-        let session: ClaudeSession
+        var session: ClaudeSession
         var state: ClaudeCodeState
         var id: String { session.id }
 
@@ -250,9 +250,25 @@ final class CompanionManager: ObservableObject {
                         guard let date = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
                               date > threshold else { continue }
                         let sessionId = "codex-" + file.deletingPathExtension().lastPathComponent
+                        // Try to extract project name from first session_meta line
+                        var projectName = "Codex"
+                        if let handle = FileHandle(forReadingAtPath: file.path),
+                           let firstChunk = String(data: handle.readData(ofLength: 32 * 1024), encoding: .utf8) {
+                            handle.closeFile()
+                            for jsonLine in firstChunk.components(separatedBy: "\n") {
+                                if let d = jsonLine.data(using: .utf8),
+                                   let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                                   obj["type"] as? String == "session_meta",
+                                   let p = obj["payload"] as? [String: Any],
+                                   let cwd = p["cwd"] as? String {
+                                    projectName = (cwd as NSString).lastPathComponent
+                                    break
+                                }
+                            }
+                        }
                         results.append(ClaudeSession(
                             id: sessionId,
-                            projectKey: dayDir.lastPathComponent,
+                            projectKey: projectName,
                             jsonlPath: file.path,
                             pid: 0,
                             ideName: "Codex",
@@ -394,8 +410,8 @@ final class CompanionManager: ObservableObject {
         guard let handle = try? FileHandle(forReadingFrom: file) else { return }
         defer { try? handle.close() }
 
-        // First: scan the first 8KB for session metadata (permissionMode, model, etc.)
-        let headData = handle.readData(ofLength: 8 * 1024)
+        // First: scan the first 32KB for session metadata (Codex session_meta can be ~15KB due to base_instructions)
+        let headData = handle.readData(ofLength: 32 * 1024)
         if let headContent = String(data: headData, encoding: .utf8) {
             loadingHistory.insert(sessionId)
             for line in headContent.components(separatedBy: .newlines) where !line.isEmpty {
@@ -470,65 +486,136 @@ final class CompanionManager: ObservableObject {
     // MARK: - Codex JSONL Parsing
 
     private func parseCodexJSONL(_ json: [String: Any], sessionId: String) {
-        guard let type = json["type"] as? String else { return }
+        guard let type = json["type"] as? String,
+              let payload = json["payload"] as? [String: Any] else { return }
 
         switch type {
         case "session_meta":
-            if let cwd = json["cwd"] as? String { updateState(for: sessionId) { $0.cwd = cwd } }
-            if let model = json["model_provider"] as? String { updateState(for: sessionId) { $0.model = model } }
-            if let mode = json["collaboration_mode_kind"] as? String {
-                updateState(for: sessionId) { $0.permissionMode = mode }
+            if let cwd = payload["cwd"] as? String {
+                updateState(for: sessionId) { $0.cwd = cwd }
+                // Derive display name from cwd
+                if let idx = sessions.firstIndex(where: { $0.id == sessionId }) {
+                    let name = (cwd as NSString).lastPathComponent
+                    if sessions[idx].session.displayName != name {
+                        sessions[idx].session.projectKey = name
+                    }
+                }
+            }
+            if let model = payload["model_provider"] as? String {
+                updateState(for: sessionId) { $0.model = model }
+            }
+            if let git = payload["git"] as? [String: Any],
+               let branch = git["branch"] as? String {
+                updateState(for: sessionId) { $0.gitBranch = branch }
             }
 
         case "event_msg":
-            if let event = json["event"] as? String {
-                switch event {
-                case "task_started":
-                    updateState(for: sessionId) { $0.isThinking = true }
-                case "task_complete":
-                    updateState(for: sessionId) { $0.isThinking = false }
-                case "function_call":
-                    if let name = json["name"] as? String {
-                        let toolId = json["call_id"] as? String ?? UUID().uuidString
-                        let arg = json["arguments"] as? String
-                        let tool = ToolExecution(id: toolId, toolName: name, argument: arg.flatMap { String($0.prefix(50)) }, startTime: Date())
-                        updateState(for: sessionId) {
-                            $0.activeTools = [tool]
-                            $0.isThinking = true
-                        }
-                    }
-                case "function_return":
-                    updateState(for: sessionId) {
-                        if let tool = $0.activeTools.first {
-                            var finished = tool
-                            finished.endTime = Date()
-                            $0.recentTools.insert(finished, at: 0)
-                            if $0.recentTools.count > 10 { $0.recentTools.removeLast() }
-                        }
-                        $0.activeTools.removeAll()
-                    }
-                case "token_count":
-                    if let tokens = json["token_count"] as? Int {
-                        updateState(for: sessionId) {
-                            $0.tokenUsage.inputTokens = tokens
-                        }
-                    }
-                default: break
+            guard let event = payload["type"] as? String else { return }
+            switch event {
+            case "task_started":
+                updateState(for: sessionId) { $0.isThinking = true }
+                if let mode = payload["collaboration_mode_kind"] as? String {
+                    updateState(for: sessionId) { $0.permissionMode = mode }
                 }
+                if let ctxWindow = payload["model_context_window"] as? Int {
+                    updateState(for: sessionId) { $0.tokenUsage.contextWindow = ctxWindow }
+                }
+            case "task_complete":
+                updateState(for: sessionId) { $0.isThinking = false }
+            case "token_count":
+                if let info = payload["info"] as? [String: Any] {
+                    // Use last_token_usage for display (what's actually in context this turn)
+                    if let last = info["last_token_usage"] as? [String: Any] {
+                        updateState(for: sessionId) {
+                            if let input = last["input_tokens"] as? Int { $0.tokenUsage.inputTokens = input }
+                            if let cached = last["cached_input_tokens"] as? Int { $0.tokenUsage.cacheReadInputTokens = cached }
+                            if let output = last["output_tokens"] as? Int { $0.tokenUsage.outputTokens = output }
+                            $0.tokenUsage.contextTokens = (last["input_tokens"] as? Int ?? 0) + (last["output_tokens"] as? Int ?? 0)
+                        }
+                    }
+                }
+            default: break
             }
 
         case "response_item":
-            if let item = json["item"] as? [String: Any] {
-                if let text = item["text"] as? String {
+            guard let itemType = payload["type"] as? String else { return }
+            switch itemType {
+            case "function_call":
+                if let name = payload["name"] as? String {
+                    let toolId = payload["call_id"] as? String ?? UUID().uuidString
+                    let arg = parseCodexToolArg(payload["arguments"] as? String)
+                    let tool = ToolExecution(id: toolId, toolName: name, argument: arg, startTime: Date())
+                    updateState(for: sessionId) {
+                        $0.activeTools = [tool]
+                        $0.isThinking = true
+                    }
+                    // Register for permission detection (same as Claude path)
+                    if !loadingHistory.contains(sessionId) {
+                        pendingTools[sessionId, default: [:]][toolId] = Date()
+                        startPermissionTimer()
+                    }
+                }
+            case "function_call_output":
+                let toolId = payload["call_id"] as? String
+                if let toolId {
+                    clearPendingTool(sessionId: sessionId, toolId: toolId)
+                }
+                updateState(for: sessionId) {
+                    if let toolId, let idx = $0.activeTools.firstIndex(where: { $0.id == toolId }) {
+                        var tool = $0.activeTools.remove(at: idx)
+                        tool.endTime = Date()
+                        $0.recentTools.insert(tool, at: 0)
+                        if $0.recentTools.count > 10 { $0.recentTools.removeLast() }
+                    } else if let tool = $0.activeTools.first {
+                        var finished = tool
+                        finished.endTime = Date()
+                        $0.recentTools.insert(finished, at: 0)
+                        if $0.recentTools.count > 10 { $0.recentTools.removeLast() }
+                        $0.activeTools.removeAll()
+                    }
+                }
+            case "message":
+                if let content = payload["content"] as? [[String: Any]],
+                   let first = content.first,
+                   let text = first["text"] as? String {
                     updateState(for: sessionId) {
                         $0.lastMessage = String(text.prefix(100))
                         $0.lastMessageTime = Date()
                     }
                 }
+            default: break
+            }
+
+        case "turn_context":
+            if let model = payload["model"] as? String {
+                updateState(for: sessionId) { $0.model = model }
             }
 
         default: break
         }
+    }
+
+    /// Extract a readable argument from Codex function_call JSON arguments string
+    private func parseCodexToolArg(_ raw: String?) -> String? {
+        guard let raw, let data = raw.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return raw.flatMap { String($0.prefix(50)) }
+        }
+        // exec_command: show cmd
+        if let cmd = obj["cmd"] as? String { return String(cmd.prefix(60)) }
+        // file operations: show path
+        if let path = obj["file_path"] as? String ?? obj["path"] as? String {
+            return String(path.prefix(60))
+        }
+        // search: show pattern or query
+        if let pattern = obj["pattern"] as? String ?? obj["query"] as? String {
+            return String(pattern.prefix(60))
+        }
+        // Fallback: first string value
+        for (_, v) in obj {
+            if let s = v as? String, !s.isEmpty { return String(s.prefix(60)) }
+        }
+        return raw.count > 50 ? String(raw.prefix(50)) : raw
     }
 
     // MARK: - OpenCode State Loading
