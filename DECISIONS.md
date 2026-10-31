@@ -18,8 +18,9 @@
 - **Date**: 2026-03-07
 - **Status**: Accepted
 - **Context**: Multiple agent types (Claude, Codex, OpenCode) can run simultaneously. Need visual distinction.
-- **Decision**: Card backgrounds at 4% opacity (orange/green/blue). Flowing light (流光) uses agent color. Removed grey activity glow due to clipping issues.
+- **Decision**: Card backgrounds at 4% opacity. Flowing light (流光) uses agent color. Removed grey activity glow due to clipping issues. Concrete mapping for agent identity indicators (card background, glow, collapsed-view dots): Claude = orange, Codex = green, OpenCode = blue. Badges are not agent-scoped: permission-mode badges color by mode and the model badge is white.
 - **Consequences**: Easy to identify which agent is which at a glance. Color scheme is consistent across cards and effects.
+- **Amendment (2026-03-08)**: Colors were previously inconsistent across views. Commit `ab8fb8c` standardized the agent mapping above; `CompanionLiveActivity.swift:47-53` is the reference implementation for dots, `CompanionView.swift:309-316` for mode badge colors.
 
 ## ADR-004: Rename to notchHUD
 - **Date**: 2026-03-07
