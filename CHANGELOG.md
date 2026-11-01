@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Added
+- Standalone Tern Notch app with a live ternwatch NDJSON stream, drawn as a black notch silhouette attached to the camera housing at the physical screen top (a matching notch over the menu bar on displays without one)
+- Collapsed notch wings: one animated activity bar per working agent and a `+N` flash for new orchestration messages
+- Expanded notch (about 760 × 440 points, limited to the screen) that unfolds from the camera: working agents first with tool, task, and subagent detail; idle and closed agents under a collapsible Idle group; recent orchestration exchanges newest first, with two-line previews
+- Agent detail with Focus, Copy pane ID, and a composer; message detail with the full text, Copy, and jumps to the sender or recipient; Esc steps back, then folds the notch
+- Working halos and sender-to-recipient message comets that run only for newly observed traffic, never for loaded history or delivery updates, pause when nothing is happening, and turn off with Reduce Motion
+- Parent/subagent messages inside one pane now animate too: comets bow from the parent halo to the subagent's dot, or loop out of the halo and back when that subagent is not shown
 - Per-session context window size (258k for Codex, 200k default)
 - Agent-colored dots in the collapsed notch view
 - Distinct permission-mode badge colors (YOLO=green, Auto=cyan, Plan=purple, Ask=white)
