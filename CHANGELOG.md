@@ -4,7 +4,8 @@
 
 ### Changed
 - Renamed the project to `TernNotch.xcodeproj` and the source folder to `TernNotch/`; the app shows the display name "Tern Notch" (bundle `local.tern.notch`, product `TernNotch`, unsandboxed, no Dock icon)
-- Collapsed-wing working robots continuously alternate a one-art-pixel bob and antenna tip every 450 ms, independently of message traffic; idle robots stay static, fresh-message reactions take priority, and Reduce Motion disables the cycle. Open-notch avatars keep their occasional working blink or antenna flip
+- Replaced the shared blob robot avatar with a 10 × 7 pixel space invader based on the supplied reference: paired antennae, hanging arms, inward feet, square eye holes, and a wide mouth opening. Agent identity colors, status expressions, and layout frames are preserved across all avatar surfaces
+- Collapsed-wing working invaders continuously alternate a one-art-pixel bob and paired antenna spread every 450 ms, independently of message traffic; idle invaders stay static, fresh-message reactions take priority, and Reduce Motion disables animation and message poses. Open-notch avatars keep their occasional working blink or antenna wiggle
 
 ### Removed
 - Expanded conversation header's connecting line and comet animation; participant speaking/listening reactions and traffic glows remain

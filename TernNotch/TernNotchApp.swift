@@ -496,7 +496,7 @@ private struct CollapsedHeader: View {
 
     private var offline: Bool { !store.isRunning || store.error != nil }
     private var crewHue: Color { offline ? Color.orange : ternAccent }
-    private var avatarSize: CGFloat { min(18, max(12, height - 13)) }
+    private var avatarSize: CGFloat { min(20, max(12, height - 11)) }
 
     private func endpoints(_ conversation: TernConversation?, _ roster: TernRoster) -> (left: TernEndpoint?, right: TernEndpoint?) {
         if let conversation = conversation { return (conversation.left, conversation.right) }

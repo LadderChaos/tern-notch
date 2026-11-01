@@ -252,12 +252,12 @@ struct PixelHalo: View {
     }
 }
 
-/// Agent avatar: a one-color 9 × 9 pixel blob robot in the agent's identity color, its eyes and mouth
-/// cut out as holes. Working robots blink or flip their antenna now and then; minimized wings opt
-/// into a continuous pixel bob and antenna cycle. Orchestrators waiting on subagents tip the antenna
-/// and glance aside; idle robots close their eyes and dim; closed panes show × eyes. While a fresh
-/// message travels, the sender hops one pixel and its antenna tip flares, and the recipient's eyes
-/// widen. Reduce Motion stops all of this motion. Each robot pixel is a whole number of points.
+/// Agent avatar: a one-color 10 × 7 pixel invader in the agent's identity color, with paired
+/// antennae, hanging arms, inward feet, and cutout eyes and mouth. Working invaders blink or
+/// wiggle their antennae; minimized wings add a continuous pixel bob. Waiting agents glance
+/// aside, idle agents close their eyes and dim, and closed panes show × eyes. Fresh messages
+/// make the sender hop and flare its antennae and the recipient widen its eyes. Reduce Motion
+/// stops animation and message poses. Each sprite pixel is a whole number of points.
 struct AgentAvatar: View {
     let hue: Color
     let mood: AgentMood
@@ -278,10 +278,10 @@ struct AgentAvatar: View {
 
     var body: some View {
         let animation = workingAnimation
-        let unit = max(1, (size / 9).rounded(.down))
+        let unit = max(1, (size / 10).rounded(.down))
         Canvas { context, canvas in
-            let origin = CGPoint(x: ((canvas.width - 9 * unit) / 2).rounded(.down),
-                                 y: ((canvas.height - 9 * unit) / 2).rounded(.down) - (speaking && !reduceMotion ? unit : 0))
+            let origin = CGPoint(x: ((canvas.width - 10 * unit) / 2).rounded(.down),
+                                 y: ((canvas.height - 7 * unit) / 2).rounded(.down) - (speaking && !reduceMotion ? unit : 0))
             var path = Path()
             for (x, y) in cells() {
                 path.addRect(CGRect(x: origin.x + CGFloat(x) * unit, y: origin.y + CGFloat(y) * unit, width: unit, height: unit))
@@ -289,7 +289,7 @@ struct AgentAvatar: View {
             context.fill(path, with: .color(color))
         }
         .frame(width: size, height: size)
-        // Move the whole canvas so the antenna and feet stay intact at the smallest wing size.
+        // Move the whole canvas so the antennae and feet stay intact at the smallest wing size.
         // Fresh-message poses take priority over the status bob.
         .offset(y: animation == .continuous && flipped && !speaking && !listening ? unit : 0)
         .task(id: animation) {
@@ -325,7 +325,7 @@ struct AgentAvatar: View {
         .accessibilityHidden(true)
     }
 
-    private var awake: Bool { mood == .working || mood == .waiting || speaking || listening }
+    private var awake: Bool { mood == .working || mood == .waiting || (!reduceMotion && (speaking || listening)) }
 
     private var color: Color {
         let base = mood == .offline ? Color.orange : hue
@@ -334,34 +334,35 @@ struct AgentAvatar: View {
 
     private typealias Cell = (Int, Int)
 
-    /// Head rows 2–7 and feet on row 8; `x` is a filled pixel.
-    private static let head: [Cell] = {
-        let rows = ["..xxxxx..", ".xxxxxxx.", "xxxxxxxxx", "xxxxxxxxx", "xxxxxxxxx", ".xxxxxxx.", "..x...x.."]
+    /// Body rows 1–6; eyes are cut out below, and row 0 holds the movable antenna tips.
+    private static let bodyCells: [Cell] = {
+        let rows = ["...x..x...", "..xxxxxx..", ".xxxxxxxx.", "xxxxxxxxxx", "x.x....x.x", "...x..x..."]
         return rows.enumerated().flatMap { y, row in
-            row.enumerated().compactMap { x, c in c == "x" ? (x, y + 2) : nil }
+            row.enumerated().compactMap { x, c in c == "x" ? (x, y + 1) : nil }
         }
     }()
 
     private func cells() -> [Cell] {
-        let holes = eyes() + [(4, 6)]
-        var filled = Self.head.filter { cell in !holes.contains { $0 == cell } }
-        if mood == .closed { return filled }
-        // The antenna stands straight; waiting robots and wiggles tip it right; speaking flares it.
-        let tipX = (mood == .waiting && !speaking) != flipped ? 5 : 4
-        filled.append((4, 1))
-        filled += speaking ? [(3, 0), (4, 0), (5, 0)] : [(tipX, 0)]
+        let holes = eyes()
+        var filled = Self.bodyCells.filter { cell in !holes.contains { $0 == cell } }
+        let reacting = speaking && !reduceMotion
+        let spread = mood != .closed && ((mood == .waiting && !reacting) != (flipped && !reduceMotion))
+        filled += spread ? [(1, 0), (8, 0)] : [(2, 0), (7, 0)]
+        if reacting { filled += [(1, 0), (8, 0)] }
         return filled
     }
 
-    /// Eye holes: two pixels tall when open, a flat line when shut, × when the pane is closed.
+    /// Square eyes match the reference; listening widens them, idle closes them, closed uses ×.
     private func eyes() -> [Cell] {
         if mood == .closed {
-            return [(1, 3), (3, 3), (2, 4), (1, 5), (3, 5), (5, 3), (7, 3), (6, 4), (5, 5), (7, 5)]
+            return [(2, 2), (4, 2), (3, 3), (2, 4), (4, 4), (5, 2), (7, 2), (6, 3), (5, 4), (7, 4)]
         }
-        let shift = mood == .waiting && !speaking && !listening ? 1 : 0
-        if listening { return [(2, 3), (2, 4), (2, 5), (6, 3), (6, 4), (6, 5)] }
-        if !awake && mood != .offline { return [(1, 5), (2, 5), (6, 5), (7, 5)] }
-        if blinking { return [(2 + shift, 5), (6 + shift, 5)] }
-        return [(2 + shift, 4), (2 + shift, 5), (6 + shift, 4), (6 + shift, 5)]
+        let reacting = !reduceMotion && (speaking || listening)
+        let shift = mood == .waiting && !reacting ? 1 : 0
+        if listening && !reduceMotion { return [(3, 2), (3, 3), (6, 2), (6, 3)] }
+        if (!awake && mood != .offline) || (blinking && !reduceMotion) {
+            return [(2, 3), (3, 3), (6, 3), (7, 3)]
+        }
+        return [(3 + shift, 3), (6 + shift, 3)]
     }
 }
