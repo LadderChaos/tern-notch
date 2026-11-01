@@ -4,30 +4,97 @@ import SwiftUI
 
 let ternAccent = Color(red: 0.36, green: 0.86, blue: 0.92)
 
-private let agentPalette: [Color] = [
-    Color(red: 0.36, green: 0.86, blue: 0.92),
-    Color(red: 0.99, green: 0.63, blue: 0.31),
-    Color(red: 0.71, green: 0.57, blue: 1.00),
-    Color(red: 0.43, green: 0.91, blue: 0.57),
-    Color(red: 1.00, green: 0.46, blue: 0.62),
-    Color(red: 0.98, green: 0.86, blue: 0.37),
-    Color(red: 0.43, green: 0.63, blue: 1.00),
-    Color(red: 0.95, green: 0.52, blue: 0.95),
-]
+/// Identity hues ordered so neighbouring slots contrast. Pure red is left out: it marks failed messages.
+private let agentPalette: [Color] = [190, 28, 268, 140, 335, 52, 218, 300, 165, 12, 245, 88].map {
+    Color(hue: Double($0) / 360, saturation: 0.62, brightness: 0.98)
+}
 
-/// Stable identity color shared by an agent's rail dot, message chips, and flow packets.
-func agentHue(_ pane: UInt64) -> Color {
-    agentPalette[Int(pane % UInt64(agentPalette.count))]
+/// Hands out identity colors so agents on screen do not share one. Working agents always get
+/// distinct colors (up to the palette size); idle agents take the least-used remaining slot. A pane
+/// keeps its color while it stays in the stream, unless it starts working with a color another
+/// working agent already has. Only touched from the main thread (view bodies building a roster).
+enum AgentColors {
+    private static var slots: [UInt64: Int] = [:]
+
+    static func sync(active: [TernAgent], idle: [TernAgent]) {
+        let live = Set((active + idle).map(\.pane))
+        slots = slots.filter { live.contains($0.key) }
+        var activeSlots = Set<Int>()
+        for agent in active {
+            if let slot = slots[agent.pane], !activeSlots.contains(slot) {
+                activeSlots.insert(slot)
+                continue
+            }
+            let slot = leastUsed(avoiding: activeSlots)
+            slots[agent.pane] = slot
+            activeSlots.insert(slot)
+        }
+        for agent in idle where slots[agent.pane] == nil {
+            slots[agent.pane] = leastUsed(avoiding: activeSlots)
+        }
+    }
+
+    static func color(_ pane: UInt64) -> Color {
+        agentPalette[slot(pane)]
+    }
+
+    /// A subagent never shares its parent's color: it takes one of the other slots, chosen by a
+    /// stable hash of its name so it keeps that color across snapshots and launches.
+    static func color(_ pane: UInt64, subagent: String) -> Color {
+        let count = agentPalette.count
+        let step = Int(stableHash(subagent) % UInt64(count - 1))
+        return agentPalette[(slot(pane) + 1 + step) % count]
+    }
+
+    private static func slot(_ pane: UInt64) -> Int {
+        slots[pane] ?? Int(pane % UInt64(agentPalette.count))
+    }
+
+    /// 64-bit FNV-1a over the UTF-8 bytes. Unlike `hashValue`, it is the same in every process.
+    private static func stableHash(_ text: String) -> UInt64 {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in text.utf8 { hash = (hash ^ UInt64(byte)) &* 0x0000_0100_0000_01b3 }
+        return hash
+    }
+
+    /// Prefers slots outside `avoiding`, then the fewest current holders, then palette order.
+    private static func leastUsed(avoiding: Set<Int>) -> Int {
+        var counts = [Int](repeating: 0, count: agentPalette.count)
+        for slot in slots.values { counts[slot] += 1 }
+        return counts.indices.min { a, b in
+            let keyA = (avoiding.contains(a) ? 1 : 0, counts[a], a)
+            let keyB = (avoiding.contains(b) ? 1 : 0, counts[b], b)
+            return keyA < keyB
+        }!
+    }
+}
+
+/// Identity color shared by an agent's avatar, bubbles, chips, and comets. A subagent (non-empty
+/// name) gets a color distinct from its parent's.
+func agentHue(_ pane: UInt64, subagent: String? = nil) -> Color {
+    guard let subagent = subagent, !subagent.isEmpty else { return AgentColors.color(pane) }
+    return AgentColors.color(pane, subagent: subagent)
+}
+
+// MARK: - Preferences
+
+enum TernPreferences {
+    /// `@AppStorage` key: subagents take part in conversations on their own. Off by default.
+    static let showSubagents = "ternShowSubagents"
+}
+
+extension UserDefaults {
+    /// KVO-observable mirror of `TernPreferences.showSubagents`; the property name must equal the key.
+    @objc dynamic var ternShowSubagents: Bool { bool(forKey: TernPreferences.showSubagents) }
 }
 
 // MARK: - Roster
 
 /// Working agents (or orchestrators waiting on running subagents) first, then idle, then closed.
-/// Order inside each group is stable so rows do not shuffle on every snapshot.
+/// Order inside each group is stable so colors and counts do not shuffle on every snapshot.
 struct TernRoster {
     let active: [TernAgent]
     let idle: [TernAgent]
-    let openCount: Int
     private let byPane: [UInt64: TernAgent]
 
     init(_ agents: [TernAgent]) {
@@ -35,17 +102,122 @@ struct TernRoster {
         let isActive: (TernAgent) -> Bool = { $0.open && ($0.working || $0.subagents.contains(where: \.running)) }
         active = agents.filter(isActive).sorted(by: stable)
         idle = agents.filter { $0.open && !isActive($0) }.sorted(by: stable) + agents.filter { !$0.open }.sorted(by: stable)
-        openCount = agents.filter(\.open).count
+        AgentColors.sync(active: active, idle: idle)
         byPane = Dictionary(agents.map { ($0.pane, $0) }, uniquingKeysWith: { first, _ in first })
     }
 
     func agent(_ pane: UInt64) -> TernAgent? { byPane[pane] }
+
+    /// Short name: the subagent's own name, the agent's readable name, or "External" for panes outside the stream.
+    func name(_ endpoint: TernEndpoint) -> String {
+        endpoint.subagent ?? agent(endpoint.pane).map(agentName) ?? "External"
+    }
+
+    /// Name qualified by the parent pane for subagents ("parent/subagent"), for help text and VoiceOver.
+    func fullName(_ endpoint: TernEndpoint) -> String {
+        let parent = agent(endpoint.pane).map(agentName) ?? "External"
+        return endpoint.subagent.map { "\(parent)/\($0)" } ?? parent
+    }
+
+    func hue(_ endpoint: TernEndpoint) -> Color {
+        agent(endpoint.pane) == nil ? Color.white.opacity(0.55) : agentHue(endpoint.pane, subagent: endpoint.subagent)
+    }
+
+    /// Reported state only: a subagent works while its parent lists it as running.
+    func mood(_ endpoint: TernEndpoint) -> AgentMood {
+        guard let agent = agent(endpoint.pane) else { return .closed }
+        guard let name = endpoint.subagent else { return agentMood(agent) }
+        if !agent.open { return .closed }
+        return agent.subagents.contains { $0.name == name && $0.running } ? .working : .idle
+    }
+}
+
+// MARK: - Conversations
+
+/// One conversation participant: a top-level pane, or one of its subagents while subagents are shown.
+struct TernEndpoint: Hashable {
+    let pane: UInt64
+    /// Nil for the pane itself; never empty.
+    let subagent: String?
+
+    init(pane: UInt64, subagent: String? = nil) {
+        self.pane = pane
+        self.subagent = subagent.flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    init(_ node: TernNode) {
+        self.init(pane: node.pane, subagent: node.subagent)
+    }
+
+    fileprivate func precedes(_ other: TernEndpoint) -> Bool {
+        pane != other.pane ? pane < other.pane : (subagent ?? "") < (other.subagent ?? "")
+    }
+}
+
+/// The messages exchanged between one pair of endpoints, oldest to newest.
+struct TernConversation: Identifiable {
+    /// Unordered endpoint pair: messages A → B and B → A belong to one conversation.
+    struct ID: Hashable {
+        let first: TernEndpoint
+        let second: TernEndpoint
+
+        init(_ a: TernEndpoint, _ b: TernEndpoint) {
+            (first, second) = a.precedes(b) ? (a, b) : (b, a)
+        }
+    }
+
+    let id: ID
+    /// Sender of the earliest loaded message; the sides never swap as replies arrive.
+    let left: TernEndpoint
+    let right: TernEndpoint
+    /// Oldest to newest; never empty.
+    fileprivate(set) var entries: [TrafficEntry]
+    /// Position of the latest message in the traffic list; orders conversations newest first.
+    fileprivate var latestIndex: Int
+
+    var latest: TrafficEntry { entries[entries.count - 1] }
+
+    /// When the latest message was sent (or delivered, when no send time was reported).
+    var latestDate: Date? {
+        (latest.item.sentMs ?? latest.item.deliveredMs).map { Date(timeIntervalSince1970: Double($0) / 1000) }
+    }
+
+    /// The conversation a message from `from` to `to` belongs to, or nil when the filter drops it.
+    /// With subagents hidden, conversations are between distinct top-level panes only; with them
+    /// shown, any two distinct endpoints, so a pane can talk to its own subagent.
+    static func id(_ from: TernEndpoint, _ to: TernEndpoint, subagents: Bool) -> ID? {
+        if !subagents && (from.subagent != nil || to.subagent != nil || from.pane == to.pane) { return nil }
+        return from == to ? nil : ID(from, to)
+    }
+
+    /// Groups traffic (oldest to newest) into conversations, newest first, and counts the messages
+    /// dropped only because an endpoint is a subagent while subagents are hidden.
+    static func index(_ entries: [TrafficEntry], subagents: Bool) -> (conversations: [TernConversation], hiddenSubagentMessages: Int) {
+        var conversations: [TernConversation] = []
+        var positions: [ID: Int] = [:]
+        var hidden = 0
+        for (index, entry) in entries.enumerated() {
+            let from = TernEndpoint(entry.item.from)
+            let to = TernEndpoint(entry.item.to)
+            if !subagents && (from.subagent != nil || to.subagent != nil) { hidden += 1 }
+            guard let id = id(from, to, subagents: subagents) else { continue }
+            if let position = positions[id] {
+                conversations[position].entries.append(entry)
+                conversations[position].latestIndex = index
+            } else {
+                positions[id] = conversations.count
+                conversations.append(TernConversation(id: id, left: from, right: to, entries: [entry], latestIndex: index))
+            }
+        }
+        return (conversations.sorted { $0.latestIndex > $1.latestIndex }, hidden)
+    }
 }
 
 // MARK: - Traffic
 
-/// Owns message identity and fresh-arrival detection for both notch states, so opening the notch
-/// never replays loaded history and delivery updates keep their identity instead of reading as new traffic.
+/// Owns message identity, fresh-arrival detection, and the conversation index for both notch
+/// states, so opening the notch never replays loaded history and delivery updates keep their
+/// identity instead of reading as new traffic.
 final class TernTraffic: ObservableObject {
     static let pulseDuration: TimeInterval = 1.4
 
@@ -55,6 +227,12 @@ final class TernTraffic: ObservableObject {
     @Published private(set) var pulses: [TrafficPulse] = []
     /// Increments only when fresh traffic arrives; drives insertion animation.
     @Published private(set) var arrivals = 0
+    /// Conversations under the Subagents filter, newest first. Rebuilt only when `entries` or the filter change.
+    @Published private(set) var conversations: [TernConversation] = []
+    /// Messages hidden only because an endpoint is a subagent; 0 while subagents are shown.
+    @Published private(set) var hiddenSubagentMessages = 0
+    /// Current value of the Subagents filter (`TernPreferences.showSubagents`).
+    private(set) var showSubagents = false
 
     private var observed: Set<TrafficEntry.ID> = []
     private var hasBaseline = false
@@ -74,9 +252,53 @@ final class TernTraffic: ObservableObject {
                 if !running { self?.resetBaseline() }
             }
             .store(in: &subscriptions)
+        $entries
+            .combineLatest(UserDefaults.standard.publisher(for: \.ternShowSubagents).removeDuplicates())
+            .sink { [weak self] entries, subagents in
+                self?.reindex(entries, subagents: subagents)
+            }
+            .store(in: &subscriptions)
     }
 
     func isFresh(_ id: TrafficEntry.ID) -> Bool { pulses.contains { $0.entry == id } }
+
+    func isFresh(_ id: TernConversation.ID) -> Bool { pulses.contains { conversationID(of: $0) == id } }
+
+    /// The pinned conversation while it exists, otherwise the one with the latest message.
+    func conversation(pinned: TernConversation.ID?) -> TernConversation? {
+        pinned.flatMap { id in conversations.first { $0.id == id } } ?? conversations.first
+    }
+
+    func conversationID(of pulse: TrafficPulse) -> TernConversation.ID? {
+        TernConversation.id(TernEndpoint(pane: pulse.from, subagent: pulse.fromSubagent),
+                            TernEndpoint(pane: pulse.to, subagent: pulse.toSubagent), subagents: showSubagents)
+    }
+
+    func pulses(in id: TernConversation.ID) -> [TrafficPulse] {
+        pulses.filter { conversationID(of: $0) == id }
+    }
+
+    /// A fresh message from this endpoint is in flight. Pulses expire, so this is finite.
+    func speaking(_ endpoint: TernEndpoint) -> Bool {
+        pulses.contains { matches(pane: $0.from, subagent: $0.fromSubagent, endpoint) }
+    }
+
+    /// A fresh message to this endpoint just arrived.
+    func listening(_ endpoint: TernEndpoint) -> Bool {
+        pulses.contains { matches(pane: $0.to, subagent: $0.toSubagent, endpoint) }
+    }
+
+    /// With subagents hidden a pane speaks for its subagents too; shown, each endpoint is its own.
+    private func matches(pane: UInt64, subagent: String?, _ endpoint: TernEndpoint) -> Bool {
+        pane == endpoint.pane && (!showSubagents || subagent == endpoint.subagent)
+    }
+
+    private func reindex(_ entries: [TrafficEntry], subagents: Bool) {
+        let index = TernConversation.index(entries, subagents: subagents)
+        showSubagents = subagents
+        conversations = index.conversations
+        if hiddenSubagentMessages != index.hiddenSubagentMessages { hiddenSubagentMessages = index.hiddenSubagentMessages }
+    }
 
     private func resetBaseline() {
         hasBaseline = false
@@ -86,7 +308,6 @@ final class TernTraffic: ObservableObject {
         expiry = nil
         if !pulses.isEmpty { pulses.removeAll() }
     }
-
     private func rebuild(_ messages: [TernMessage], hasAgents: Bool) {
         let now = Date()
         var occurrences: [TrafficKey: Int] = [:]
@@ -155,43 +376,52 @@ final class TernTraffic: ObservableObject {
     }
 }
 
-/// Selection and draft survive collapsing the notch.
+/// Pinned conversation, selection, and draft survive collapsing the notch.
 final class TernViewState: ObservableObject {
+    /// Conversation shown in both notch states; nil follows the conversation with the latest message.
+    @Published var pinned: TernConversation.ID?
     @Published var selectedPane: UInt64?
     @Published var selectedMessage: TrafficEntry.ID?
     @Published var draft = ""
-    @Published var showIdle = false
 
-    /// Steps back one level; returns false when already at the overview.
+    /// Steps back one level: message, then agent, then pinned conversation. Returns false when
+    /// already following the live conversation.
     @discardableResult
     func back() -> Bool {
         if selectedMessage != nil { selectedMessage = nil; return true }
         if selectedPane != nil { selectedPane = nil; return true }
+        if pinned != nil { pinned = nil; return true }
         return false
     }
 }
 
 // MARK: - Expanded notch body
 
+/// The open notch: a strip of recent conversations, then the shown conversation as two agents
+/// facing each other above a mirrored transcript, or an agent or message detail.
 struct TernView: View {
     @ObservedObject var store: TernStreamStore
     @ObservedObject var traffic: TernTraffic
     @ObservedObject var state: TernViewState
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var copied: String?
+    @FocusState private var composing: Bool
 
-    private let flowGutter: CGFloat = 14
+    /// Bubbles never run wider than this share of the transcript, so the two sides stay apart.
+    private let bubbleShare: CGFloat = 0.62
+    /// Newest messages kept in the transcript; agent details list each agent's exchanges.
+    private let transcriptLimit = 150
+    /// Conversation chips in the switcher, newest first (plus the pinned one if older).
+    private let chipLimit = 12
 
     var body: some View {
         let roster = TernRoster(store.agents)
+        let conversation = traffic.conversation(pinned: state.pinned)
         VStack(alignment: .leading, spacing: 8) {
             if let error = store.error { banner("Watcher", error, offerRestart: true) }
             if let error = store.actionError { banner("Action failed", error, offerRestart: false) }
-            HStack(alignment: .top, spacing: 12) {
-                agentRail(roster).frame(width: 248)
-                Rectangle().fill(Color.white.opacity(0.07)).frame(width: 1)
-                detail(roster)
-            }
+            if !traffic.conversations.isEmpty || !store.agents.isEmpty { switcher(roster, shown: conversation) }
+            detail(roster, conversation)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onReceive(traffic.$entries) { entries in
@@ -207,207 +437,142 @@ struct TernView: View {
         }
     }
 
-    // MARK: Agent rail
+    // MARK: Conversation switcher
 
-    private func agentRail(_ roster: TernRoster) -> some View {
-        let idleVisible = state.showIdle || roster.active.isEmpty
-        let hiddenIdle: Set<UInt64> = idleVisible ? [] : Set(roster.idle.map(\.pane))
-        return VStack(alignment: .leading, spacing: 8) {
+    private func switcher(_ roster: TernRoster, shown: TernConversation?) -> some View {
+        var chips = Array(traffic.conversations.prefix(chipLimit))
+        if let shown = shown, !chips.contains(where: { $0.id == shown.id }) { chips.append(shown) }
+        return ScrollView(.horizontal) {
             HStack(spacing: 6) {
-                sectionLabel("Working")
-                countBadge(roster.active.count, color: roster.active.isEmpty ? Color.white.opacity(0.4) : Color.green)
-                Spacer(minLength: 0)
+                messageMenu(roster)
+                liveChip
+                ForEach(chips) { conversationChip($0, roster, shown: $0.id == shown?.id) }
             }
-            .padding(.leading, flowGutter + 8)
-            if store.agents.isEmpty {
-                railEmptyState
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 4) {
-                        if roster.active.isEmpty {
-                            Text("No agent is working right now.")
-                                .font(.system(size: 11))
-                                .foregroundStyle(Color.white.opacity(0.45))
-                                .padding(.horizontal, 8).padding(.vertical, 4)
-                        }
-                        ForEach(roster.active) { activeRow($0) }
-                        if !roster.idle.isEmpty {
-                            idleHeader(roster, visible: idleVisible).padding(.top, roster.active.isEmpty ? 0 : 6)
-                            if idleVisible {
-                                ForEach(roster.idle) { idleRow($0) }
-                            }
-                        }
-                    }
-                    .padding(.leading, flowGutter)
-                    .padding(.vertical, 2)
-                }
-                .scrollIndicators(.never)
-                .overlayPreferenceValue(FlowAnchorsKey.self) { anchors in
-                    FlowOverlay(anchors: anchors, working: roster.active.map(\.pane), pulses: traffic.pulses,
-                                hiddenIdle: hiddenIdle, reduceMotion: reduceMotion)
-                }
-            }
+            .padding(.vertical, 1)
         }
+        .scrollIndicators(.never)
+        .frame(height: 26)
     }
 
-    private var railEmptyState: some View {
-        VStack(spacing: 8) {
-            Image(systemName: store.isRunning ? "dot.radiowaves.left.and.right" : "bolt.horizontal.circle")
-                .font(.system(size: 20)).foregroundStyle(ternAccent)
-            Text(store.isRunning ? "Waiting for agents" : "Watcher offline")
-                .font(.system(size: 12.5, weight: .semibold))
-            Text(store.isRunning ? "Working agents appear here first." : "Tern Notch retries every 5 seconds.")
-                .font(.system(size: 11)).foregroundStyle(Color.white.opacity(0.5))
-                .multilineTextAlignment(.center)
-            if !store.isRunning {
-                Button("Restart watcher") { store.restart() }.controlSize(.small)
+    private var liveChip: some View {
+        let live = state.pinned == nil
+        return Button { show(nil) } label: {
+            HStack(spacing: 5) {
+                Circle().fill(store.isRunning ? Color.green : Color.orange).frame(width: 6, height: 6)
+                Text("Live").font(.system(size: 11, weight: .semibold))
             }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func activeRow(_ agent: TernAgent) -> some View {
-        let hue = agentHue(agent.pane)
-        let selected = state.selectedPane == agent.pane
-        let progress = agent.todo.flatMap { $0.total > 0 ? Double($0.done) / Double($0.total) : nil }
-        return Button { select(agent.pane) } label: {
-            HStack(alignment: .top, spacing: 9) {
-                Circle().fill(hue).frame(width: 9, height: 9)
-                    .shadow(color: hue.opacity(0.8), radius: 4)
-                    .anchorPreference(key: FlowAnchorsKey.self, value: .center) { [FlowNode.pane(agent.pane): $0] }
-                    .padding(.top, 4)
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text(agentName(agent))
-                            .font(.system(size: 12.5, weight: .semibold))
-                            .foregroundStyle(Color.white)
-                            .lineLimit(1)
-                        Spacer(minLength: 4)
-                        if let todo = agent.todo, todo.total > 0 {
-                            Text("\(todo.done)/\(todo.total)")
-                                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                .foregroundStyle(Color.white.opacity(0.5))
-                        }
-                    }
-                    Text(activityLine(agent))
-                        .font(.system(size: 11))
-                        .foregroundStyle(Color.white.opacity(0.62))
-                        .lineLimit(1)
-                    if let progress = progress {
-                        ProgressTrack(fraction: progress, color: hue).frame(height: 3).padding(.top, 2)
-                    }
-                    if !agent.subagents.isEmpty { subagentStrip(agent.subagents, pane: agent.pane, hue: hue) }
-                }
-            }
-            .padding(.horizontal, 8).padding(.vertical, 7)
-            .background(rowBackground(selected: selected, hue: hue, base: 0.05))
-            .contentShape(Rectangle())
+            .foregroundStyle(live ? Color.white : Color.white.opacity(0.6))
+            .padding(.horizontal, 9)
+            .frame(height: 24)
+            .background(Capsule().fill(live ? Color.green.opacity(0.18) : Color.white.opacity(0.06)))
+            .overlay(Capsule().strokeBorder(Color.green.opacity(live ? 0.55 : 0), lineWidth: 1))
+            .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .help("\(agentName(agent)) · pane \(agent.pane) · tab \(agent.tab)\n\(agent.description)\n\(agent.cwd)")
-        .accessibilityLabel("\(agentName(agent)), \(agentStatus(agent)), \(activityLine(agent))")
-        .accessibilityAddTraits(selected ? .isSelected : [])
+        .help("Follow the latest conversation")
+        .accessibilityLabel("Follow live conversation")
+        .accessibilityAddTraits(live ? .isSelected : [])
     }
 
-    private func idleHeader(_ roster: TernRoster, visible: Bool) -> some View {
-        let toggleable = !roster.active.isEmpty
-        return Button {
-            guard toggleable else { return }
-            withAnimation(reduceMotion ? nil : .snappy(duration: 0.25)) { state.showIdle.toggle() }
+    /// Picks any agent in the stream, with or without a conversation, and opens its composer.
+    private func messageMenu(_ roster: TernRoster) -> some View {
+        let selected = state.selectedPane != nil && state.selectedMessage == nil
+        return Menu {
+            ForEach(roster.active + roster.idle, id: \.pane) { agent in
+                Button {
+                    openAgent(agent.pane)
+                    // The composer appears with the detail; focus it once it exists.
+                    DispatchQueue.main.async { composing = true }
+                } label: {
+                    Text("\(agentName(agent)) · \(agent.open ? (agent.working ? "working" : "idle") : "closed")")
+                }
+                .disabled(!agent.open)
+            }
         } label: {
-            HStack(spacing: 9) {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 8.5, weight: .bold))
-                    .rotationEffect(.degrees(visible ? 90 : 0))
-                    .opacity(toggleable ? 1 : 0)
-                    .frame(width: 9, height: 9)
-                    .anchorPreference(key: FlowAnchorsKey.self, value: .center) { [FlowNode.idleGroup: $0] }
-                sectionLabel("Idle")
-                countBadge(roster.idle.count, color: Color.white.opacity(0.45))
-                Spacer(minLength: 4)
-                if !visible {
-                    HStack(spacing: 3) {
-                        ForEach(roster.idle.prefix(10)) { agent in
-                            Circle().fill(agentHue(agent.pane).opacity(agent.open ? 0.75 : 0.25)).frame(width: 5, height: 5)
-                        }
-                    }
+            HStack(spacing: 5) {
+                Image(systemName: "square.and.pencil").font(.system(size: 10.5, weight: .semibold))
+                Text("Message").font(.system(size: 11, weight: .semibold))
+            }
+            .foregroundStyle(selected ? Color.white : Color.white.opacity(0.6))
+            .padding(.horizontal, 9)
+            .frame(height: 24)
+            .background(Capsule().fill(selected ? ternAccent.opacity(0.18) : Color.white.opacity(0.06)))
+            .overlay(Capsule().strokeBorder(ternAccent.opacity(selected ? 0.55 : 0), lineWidth: 1))
+            .contentShape(Capsule())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .disabled(store.agents.isEmpty)
+        .help("Message any agent directly")
+        .accessibilityLabel("Message an agent")
+    }
+
+    /// Mirrored like the header: left participant, message count, right participant.
+    private func conversationChip(_ conversation: TernConversation, _ roster: TernRoster, shown: Bool) -> some View {
+        let pinned = state.pinned == conversation.id
+        let fresh = !reduceMotion && traffic.isFresh(conversation.id)
+        let leftHue = roster.hue(conversation.left)
+        let rightHue = roster.hue(conversation.right)
+        let pair = LinearGradient(colors: [leftHue, rightHue], startPoint: .leading, endPoint: .trailing)
+        let count = conversation.entries.count
+        let names = "\(roster.fullName(conversation.left)) and \(roster.fullName(conversation.right))"
+        return Button { show(conversation.id) } label: {
+            HStack(spacing: 5) {
+                AgentAvatar(hue: leftHue, mood: roster.mood(conversation.left), size: 13)
+                Text(chipName(roster.name(conversation.left))).foregroundStyle(leftHue)
+                Text("\(count)")
+                    .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(Color.white.opacity(0.7))
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(Capsule().fill(Color.white.opacity(0.1)))
+                Text(chipName(roster.name(conversation.right))).foregroundStyle(rightHue)
+                AgentAvatar(hue: rightHue, mood: roster.mood(conversation.right), size: 13)
+                if pinned {
+                    Image(systemName: "pin.fill").font(.system(size: 8, weight: .bold)).foregroundStyle(Color.white.opacity(0.6))
                 }
             }
-            .foregroundStyle(Color.white.opacity(0.55))
-            .padding(.horizontal, 8).padding(.vertical, 5)
-            .contentShape(Rectangle())
+            .font(.system(size: 11, weight: .medium))
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, 7)
+            .frame(height: 24)
+            .background(
+                ZStack {
+                    Capsule().fill(Color.white.opacity(shown ? 0.1 : 0.05))
+                    Capsule().fill(pair).opacity(fresh ? 0.3 : 0)
+                }
+            )
+            .overlay(Capsule().strokeBorder(pair, lineWidth: 1).opacity(shown ? 0.7 : fresh ? 0.5 : 0))
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.9), value: fresh)
+            .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .disabled(!toggleable)
-        .help(visible ? "Hide idle agents" : "Show \(roster.idle.count) idle agents")
-        .accessibilityLabel(visible ? "Hide idle agents" : "Show \(roster.idle.count) idle agents")
+        .help("\(names) · \(count) message\(count == 1 ? "" : "s")\(pinned ? " · pinned" : "")")
+        .accessibilityLabel("Conversation between \(names), \(count) message\(count == 1 ? "" : "s")")
+        .accessibilityHint(pinned ? "Pinned" : "Pins this conversation")
+        .accessibilityAddTraits(pinned ? .isSelected : [])
     }
 
-    private func idleRow(_ agent: TernAgent) -> some View {
-        let hue = agentHue(agent.pane)
-        let selected = state.selectedPane == agent.pane
-        return Button { select(agent.pane) } label: {
-            HStack(spacing: 9) {
-                Circle()
-                    .fill(agent.open ? hue.opacity(0.7) : Color.clear)
-                    .overlay(Circle().strokeBorder(hue.opacity(agent.open ? 0 : 0.5), lineWidth: 1))
-                    .frame(width: 7, height: 7)
-                    .frame(width: 9, height: 9)
-                    .anchorPreference(key: FlowAnchorsKey.self, value: .center) { [FlowNode.pane(agent.pane): $0] }
-                Text(agentName(agent))
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Color.white.opacity(agent.open ? 0.8 : 0.42))
-                    .lineLimit(1)
-                Spacer(minLength: 4)
-                Text(agent.open ? quietLabel(agent.quietMs) : "closed")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(Color.white.opacity(0.36))
-            }
-            .padding(.horizontal, 8).padding(.vertical, 5)
-            .background(rowBackground(selected: selected, hue: hue, base: 0))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help("\(agentName(agent)) · pane \(agent.pane) · \(agentStatus(agent))\n\(agent.cwd)")
-        .accessibilityLabel("\(agentName(agent)), \(agentStatus(agent))")
-        .accessibilityAddTraits(selected ? .isSelected : [])
-    }
+    // MARK: Detail
 
-    private func subagentStrip(_ subagents: [TernSubagent], pane: UInt64, hue: Color) -> some View {
-        let running = subagents.filter(\.running).count
-        return HStack(spacing: 4) {
-            ForEach(Array(subagents.prefix(8).enumerated()), id: \.offset) { _, subagent in
-                subagentDot(subagent, hue: hue)
-                    .anchorPreference(key: FlowAnchorsKey.self, value: .center) { [FlowNode.subagent(pane, subagent.name): $0] }
-            }
-            Text(running > 0 ? "\(running)/\(subagents.count) sub" : "\(subagents.count) sub")
-                .font(.system(size: 9.5, weight: .medium, design: .monospaced))
-                .foregroundStyle(Color.white.opacity(0.42))
-        }
-        .padding(.top, 1)
-    }
-
-    private func subagentDot(_ subagent: TernSubagent, hue: Color) -> some View {
-        Circle()
-            .fill(subagent.running ? hue : subagent.done ? hue.opacity(0.3) : Color.clear)
-            .overlay(Circle().strokeBorder(hue.opacity(subagent.running || subagent.done ? 0 : 0.5), lineWidth: 1))
-            .frame(width: 5, height: 5)
-    }
-
-    // MARK: Detail pane
-
-    private func detail(_ roster: TernRoster) -> some View {
+    private func detail(_ roster: TernRoster, _ conversation: TernConversation?) -> some View {
         let entry = state.selectedMessage.flatMap { id in traffic.entries.first { $0.id == id } }
         let agent = state.selectedPane.flatMap { roster.agent($0) }
-        let mode: DetailMode = entry.map { DetailMode.message($0.id) } ?? agent.map { DetailMode.agent($0.pane) } ?? .exchanges
+        let mode: DetailMode = entry.map { DetailMode.message($0.id) } ?? agent.map { DetailMode.agent($0.pane) }
+            ?? conversation.map { DetailMode.conversation($0.id) } ?? .empty
         return ZStack(alignment: .topLeading) {
             Group {
                 if let entry = entry {
                     messageDetail(entry, roster)
                 } else if let agent = agent {
                     agentDetail(agent, roster)
+                } else if let conversation = conversation {
+                    conversationPanel(conversation, roster)
                 } else {
-                    exchangesPanel(roster)
+                    emptyState(roster)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -418,34 +583,200 @@ struct TernView: View {
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: mode)
     }
 
-    private func exchangesPanel(_ roster: TernRoster) -> some View {
-        let failed = traffic.entries.suffix(80).filter(\.item.failed).count
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                sectionLabel("Orchestration")
-                countBadge(traffic.entries.count, color: ternAccent)
-                if failed > 0 {
-                    Text("\(failed) failed")
-                        .font(.system(size: 10.5, weight: .semibold))
-                        .foregroundStyle(Color.red.opacity(0.9))
+    private func emptyState(_ roster: TernRoster) -> some View {
+        let working = roster.active.count
+        let hidden = traffic.hiddenSubagentMessages
+        return VStack(spacing: 8) {
+            Image(systemName: store.isRunning ? "bubble.left.and.bubble.right" : "bolt.horizontal.circle")
+                .font(.system(size: 22)).foregroundStyle(ternAccent)
+            Text(store.isRunning ? "No conversations yet" : "Watcher offline")
+                .font(.system(size: 13, weight: .semibold))
+            Group {
+                if !store.isRunning {
+                    Text("Tern Notch retries every 5 seconds.")
+                } else if store.agents.isEmpty {
+                    Text("Waiting for agents.")
+                } else {
+                    Text("\(working) agent\(working == 1 ? "" : "s") working. Messages between two agents appear here as their conversation.")
                 }
-                Spacer(minLength: 0)
-                Text("newest first")
-                    .font(.system(size: 10))
-                    .foregroundStyle(Color.white.opacity(0.3))
             }
-            exchangeList(traffic.entries, roster,
-                         empty: store.isRunning ? "No orchestration messages yet." : "Messages appear when the watcher reconnects.")
+            .font(.system(size: 11.5)).foregroundStyle(Color.white.opacity(0.55))
+            if store.isRunning && hidden > 0 {
+                Text("\(hidden) subagent message\(hidden == 1 ? " is" : "s are") hidden. Turn on Subagents in the header to see them.")
+                    .font(.system(size: 11)).foregroundStyle(ternAccent.opacity(0.85))
+            }
+            if !store.isRunning {
+                Button("Restart watcher") { store.restart() }.controlSize(.small)
+            }
+        }
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: 380)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: Conversation
+
+    private func conversationPanel(_ conversation: TernConversation, _ roster: TernRoster) -> some View {
+        VStack(spacing: 8) {
+            pairHeader(conversation, roster)
+            Rectangle().fill(Color.white.opacity(0.07)).frame(height: 1)
+            transcript(conversation, roster)
         }
     }
 
+    /// The two participants mirrored around a link line; a comet crosses it while a fresh message
+    /// of this conversation travels from sender to recipient.
+    private func pairHeader(_ conversation: TernConversation, _ roster: TernRoster) -> some View {
+        let comets = traffic.pulses(in: conversation.id).map { pulse -> LinkLine.Comet in
+            let sender = TernEndpoint(pane: pulse.from, subagent: pulse.fromSubagent)
+            return LinkLine.Comet(started: pulse.started, forward: sender == conversation.left,
+                                  color: pulse.failed ? Color.red : roster.hue(sender))
+        }
+        let count = conversation.entries.count
+        return HStack(spacing: 10) {
+            participant(conversation.left, roster, leading: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(spacing: 2) {
+                LinkLine(comets: comets, leftHue: roster.hue(conversation.left), rightHue: roster.hue(conversation.right),
+                         reduceMotion: reduceMotion)
+                    .frame(height: 22)
+                Text("\(count) message\(count == 1 ? "" : "s")")
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.38))
+                    .lineLimit(1)
+            }
+            .frame(width: 120)
+            participant(conversation.right, roster, leading: false)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .frame(height: 46)
+    }
+
+    /// One side of the pair header; the right side mirrors the left. Opens the agent's detail.
+    private func participant(_ endpoint: TernEndpoint, _ roster: TernRoster, leading: Bool) -> some View {
+        let hue = roster.hue(endpoint)
+        let known = roster.agent(endpoint.pane) != nil
+        let status = participantStatus(endpoint, roster)
+        let avatar = AgentAvatar(hue: hue, mood: roster.mood(endpoint), speaking: speaking(endpoint),
+                                 listening: listening(endpoint), size: 34)
+        let text = VStack(alignment: leading ? .leading : .trailing, spacing: 2) {
+            Text(roster.name(endpoint))
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(hue)
+                .lineLimit(1)
+            Text(status)
+                .font(.system(size: 11))
+                .foregroundStyle(Color.white.opacity(0.68))
+                .lineLimit(2)
+                .multilineTextAlignment(leading ? .leading : .trailing)
+        }
+        return Button { openAgent(endpoint.pane) } label: {
+            HStack(spacing: 9) {
+                if leading {
+                    avatar
+                    text
+                } else {
+                    text
+                    avatar
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!known)
+        .help(known ? "\(roster.fullName(endpoint)) · pane \(endpoint.pane)\n\(status)" : "Pane \(endpoint.pane) is not in the stream")
+        .accessibilityLabel("\(roster.fullName(endpoint)), \(status)")
+        .accessibilityHint("Shows agent details")
+    }
+
+    private func participantStatus(_ endpoint: TernEndpoint, _ roster: TernRoster) -> String {
+        guard let agent = roster.agent(endpoint.pane) else { return "External pane \(endpoint.pane)" }
+        guard let name = endpoint.subagent else { return agent.open ? intentLine(agent) : "Pane closed" }
+        let subagent = agent.subagents.first { $0.name == name }
+        let state = subagent.map { $0.running ? "running" : $0.done ? "done" : "idle" } ?? "not listed"
+        return "Subagent of \(agentName(agent)) · \(state)"
+    }
+
+    /// Oldest to newest, scrolled to the newest message on open and on each arrival.
+    private func transcript(_ conversation: TernConversation, _ roster: TernRoster) -> some View {
+        let entries = Array(conversation.entries.suffix(transcriptLimit))
+        let newest = conversation.latest.id
+        return ScrollViewReader { proxy in
+            ScrollView {
+                VStack(spacing: 6) {
+                    ForEach(entries) { entry in
+                        bubble(entry, conversation, roster)
+                            .id(entry.id)
+                            .transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity), removal: .opacity))
+                    }
+                }
+                .padding(.vertical, 2)
+                // Only fresh arrivals animate; loaded history and delivery updates do not change `arrivals`.
+                .animation(reduceMotion ? nil : .spring(response: 0.45, dampingFraction: 0.78), value: traffic.arrivals)
+            }
+            .scrollIndicators(.never)
+            .defaultScrollAnchor(.bottom)
+            .onAppear { proxy.scrollTo(newest, anchor: .bottom) }
+            .onChange(of: newest) { _, id in
+                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.3)) { proxy.scrollTo(id, anchor: .bottom) }
+            }
+        }
+        .frame(maxHeight: .infinity)
+    }
+
+    /// One message as a mirrored chat bubble: the left participant's messages hug the left edge and
+    /// the right participant's the right edge, each in the sender's color, at most `bubbleShare` wide.
+    private func bubble(_ entry: TrafficEntry, _ conversation: TernConversation, _ roster: TernRoster) -> some View {
+        let item = entry.item
+        let sender = TernEndpoint(item.from)
+        let leading = sender == conversation.left
+        let alignment: Alignment = leading ? .leading : .trailing
+        let hue = roster.hue(sender)
+        let edge = item.failed ? Color.red : hue
+        let fresh = !reduceMotion && traffic.isFresh(entry.id)
+        let selected = state.selectedMessage == entry.id
+        let shape = UnevenRoundedRectangle(topLeadingRadius: leading ? 3 : 12, bottomLeadingRadius: 12,
+                                           bottomTrailingRadius: 12, topTrailingRadius: leading ? 12 : 3, style: .continuous)
+        return Button { state.selectedMessage = entry.id } label: {
+            VStack(alignment: leading ? .leading : .trailing, spacing: 3) {
+                HStack(spacing: 5) {
+                    if item.reply { Text("reply") }
+                    Text(entry.time)
+                    deliveryGlyph(item)
+                }
+                .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                .foregroundStyle(hue.opacity(0.8))
+                Text(entry.preview)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Color.white.opacity(0.88))
+                    .lineLimit(4)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(shape.fill(hue.opacity(fresh ? 0.3 : selected ? 0.24 : 0.13)))
+            .overlay(shape.strokeBorder(edge.opacity(fresh ? 0.8 : selected || item.failed ? 0.6 : 0.22), lineWidth: 1))
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.9), value: fresh)
+            .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .containerRelativeFrame(.horizontal, alignment: alignment) { length, _ in length * bubbleShare }
+        .frame(maxWidth: .infinity, alignment: alignment)
+        .help("\(route(item, roster)) · \(delivery(item))\n\(entry.preview)")
+        .accessibilityLabel("\(route(item, roster, spoken: true)), \(entry.time), \(delivery(item)), \(entry.preview)")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    // MARK: Agent detail
+
     private func agentDetail(_ agent: TernAgent, _ roster: TernRoster) -> some View {
         let hue = agentHue(agent.pane)
+        let endpoint = TernEndpoint(pane: agent.pane)
         let related = traffic.entries.filter { $0.item.from.pane == agent.pane || $0.item.to.pane == agent.pane }
         return VStack(alignment: .leading, spacing: 9) {
             HStack(spacing: 8) {
                 backButton
-                Circle().fill(hue).frame(width: 10, height: 10).shadow(color: hue.opacity(0.8), radius: 4)
+                AgentAvatar(hue: hue, mood: agentMood(agent), speaking: speaking(endpoint), listening: listening(endpoint), size: 30)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(agentName(agent)).font(.system(size: 14, weight: .semibold)).lineLimit(1)
                     Text(agentHeadline(agent))
@@ -472,8 +803,8 @@ struct TernView: View {
                     .lineLimit(2)
                     .textSelection(.enabled)
             }
-            if agent.tool != nil || agent.todo != nil { activityCard(agent, hue: hue) }
-            if !agent.subagents.isEmpty { subagentChips(agent.subagents, hue: hue) }
+            if agentMood(agent) == .working || agentMood(agent) == .waiting || agent.todo != nil { nowCard(agent, hue: hue) }
+            if !agent.subagents.isEmpty { subagentChips(agent, roster) }
             Text(locationLine(agent))
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundStyle(Color.white.opacity(0.42))
@@ -492,21 +823,25 @@ struct TernView: View {
         }
     }
 
-    private func activityCard(_ agent: TernAgent, hue: Color) -> some View {
-        HStack(alignment: .top, spacing: 9) {
+    /// What the agent is doing right now, in its own words (the tool intent it reported).
+    private func nowCard(_ agent: TernAgent, hue: Color) -> some View {
+        let mood = agentMood(agent)
+        return HStack(alignment: .top, spacing: 9) {
             RoundedRectangle(cornerRadius: 1).fill(hue).frame(width: 2)
             VStack(alignment: .leading, spacing: 4) {
-                if let tool = agent.tool {
-                    Text(tool.name.isEmpty ? "tool" : tool.name)
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                HStack(spacing: 6) {
+                    Text(mood == .working ? "WORKING ON" : mood == .waiting ? "ORCHESTRATING" : "TASKS")
+                        .font(.system(size: 9.5, weight: .bold))
+                        .tracking(0.8)
                         .foregroundStyle(hue)
-                    if !tool.intent.isEmpty {
-                        Text(tool.intent)
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(Color.white.opacity(0.8))
-                            .lineLimit(2)
-                            .textSelection(.enabled)
-                    }
+                    if let tag = toolTagName(agent) { toolTag(tag, hue: hue) }
+                }
+                if mood == .working || mood == .waiting {
+                    Text(intentLine(agent))
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.white.opacity(0.86))
+                        .lineLimit(3)
+                        .textSelection(.enabled)
                 }
                 if let todo = agent.todo, todo.total > 0 {
                     HStack(spacing: 8) {
@@ -525,12 +860,13 @@ struct TernView: View {
         .fixedSize(horizontal: false, vertical: true)
     }
 
-    private func subagentChips(_ subagents: [TernSubagent], hue: Color) -> some View {
+    private func subagentChips(_ agent: TernAgent, _ roster: TernRoster) -> some View {
         ScrollView(.horizontal) {
             HStack(spacing: 5) {
-                ForEach(Array(subagents.enumerated()), id: \.offset) { _, subagent in
+                ForEach(Array(agent.subagents.enumerated()), id: \.offset) { _, subagent in
                     HStack(spacing: 4) {
-                        subagentDot(subagent, hue: hue)
+                        AgentAvatar(hue: roster.hue(TernEndpoint(pane: agent.pane, subagent: subagent.name)),
+                                    mood: subagent.running ? .working : subagent.done ? .idle : .closed, size: 13)
                         Text(subagent.name).lineLimit(1)
                         Text(subagent.running ? "running" : subagent.done ? "done" : "idle")
                             .foregroundStyle(Color.white.opacity(0.4))
@@ -550,9 +886,9 @@ struct TernView: View {
             HStack(spacing: 6) {
                 backButton
                 nodeChip(item.from, roster)
-                Image(systemName: item.reply ? "arrowshape.turn.up.left.fill" : "arrow.right")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(Color.white.opacity(0.4))
+                Text(item.reply ? "replied to" : "to")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.white.opacity(0.45))
                 nodeChip(item.to, roster)
                 Spacer(minLength: 6)
                 Button { copy(item.text, token: "message") } label: {
@@ -598,10 +934,7 @@ struct TernView: View {
     @ViewBuilder
     private func jumpButton(_ pane: UInt64, _ roster: TernRoster, role: String) -> some View {
         if let agent = roster.agent(pane) {
-            Button {
-                state.selectedMessage = nil
-                state.selectedPane = pane
-            } label: {
+            Button { openAgent(pane) } label: {
                 Label(agentName(agent), systemImage: "arrow.up.forward.circle")
             }
             .buttonStyle(.bordered)
@@ -636,64 +969,77 @@ struct TernView: View {
         .frame(maxHeight: .infinity)
     }
 
+    /// One exchange in an agent's detail: the sender's face, "sender to recipient", and a speech bubble preview.
     private func exchangeRow(_ entry: TrafficEntry, _ roster: TernRoster) -> some View {
         let item = entry.item
         let fresh = !reduceMotion && traffic.isFresh(entry.id)
-        let color = item.failed ? Color.red : nodeHue(item.from, roster)
+        let color = item.failed ? Color.red : roster.hue(TernEndpoint(item.from))
         let selected = state.selectedMessage == entry.id
+        let bubble = UnevenRoundedRectangle(topLeadingRadius: 3, bottomLeadingRadius: 10, bottomTrailingRadius: 10,
+                                            topTrailingRadius: 10, style: .continuous)
         return Button { state.selectedMessage = entry.id } label: {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 5) {
-                    nodeChip(item.from, roster)
-                    Image(systemName: item.reply ? "arrowshape.turn.up.left.fill" : "arrow.right")
-                        .font(.system(size: 8.5, weight: .bold))
-                        .foregroundStyle(Color.white.opacity(0.4))
-                    nodeChip(item.to, roster)
-                    Spacer(minLength: 6)
-                    deliveryGlyph(item)
-                    Text(entry.time)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(Color.white.opacity(0.36))
+            HStack(alignment: .top, spacing: 8) {
+                nodeFace(item.from, roster, size: 20, speaking: fresh)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 4) {
+                        speakerLabel(item.from, roster)
+                        Text(item.reply ? "replied to" : "to")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(Color.white.opacity(0.4))
+                            .fixedSize()
+                        speakerLabel(item.to, roster)
+                        Spacer(minLength: 6)
+                        deliveryGlyph(item)
+                        Text(entry.time)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(Color.white.opacity(0.36))
+                            .fixedSize()
+                    }
+                    Text(entry.preview)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Color.white.opacity(0.84))
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 9).padding(.vertical, 6)
+                        .background(bubble.fill(fresh ? color.opacity(0.17) : Color.white.opacity(selected ? 0.12 : 0.05)))
+                        .overlay(bubble.strokeBorder(color.opacity(fresh ? 0.75 : selected ? 0.45 : 0), lineWidth: 1))
+                        .animation(reduceMotion ? nil : .easeOut(duration: 0.9), value: fresh)
                 }
-                Text(entry.preview)
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(Color.white.opacity(0.8))
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(.horizontal, 10).padding(.vertical, 8)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(fresh ? color.opacity(0.17) : Color.white.opacity(selected ? 0.1 : 0.045))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(color.opacity(fresh ? 0.75 : 0), lineWidth: 1)
-            )
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.9), value: fresh)
+            .padding(.horizontal, 4).padding(.vertical, 3)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .help("\(route(item, roster)) · \(delivery(item))\n\(entry.preview)")
-        .accessibilityLabel("\(entry.time), \(route(item, roster)), \(delivery(item)), \(entry.preview)")
+        .accessibilityLabel("\(entry.time), \(route(item, roster, spoken: true)), \(delivery(item)), \(entry.preview)")
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
-    private func nodeChip(_ node: TernNode, _ roster: TernRoster) -> some View {
-        let hue = nodeHue(node, roster)
-        return HStack(spacing: 4) {
-            Circle().fill(hue).frame(width: 6, height: 6)
-            Text(paneName(node.pane, roster))
+    private func speakerLabel(_ node: TernNode, _ roster: TernRoster) -> some View {
+        let endpoint = TernEndpoint(node)
+        return HStack(spacing: 3) {
+            Text(roster.name(TernEndpoint(pane: node.pane)))
                 .font(.system(size: 11.5, weight: .semibold))
-                .foregroundStyle(hue)
-                .lineLimit(1)
-            if let subagent = node.subagent, !subagent.isEmpty {
+                .foregroundStyle(roster.hue(endpoint))
+            if let subagent = endpoint.subagent {
                 Text(subagent)
                     .font(.system(size: 10.5))
                     .foregroundStyle(Color.white.opacity(0.5))
-                    .lineLimit(1)
             }
+        }
+        .lineLimit(1)
+    }
+
+    private func nodeFace(_ node: TernNode, _ roster: TernRoster, size: CGFloat, speaking: Bool = false) -> some View {
+        let endpoint = TernEndpoint(node)
+        return AgentAvatar(hue: roster.hue(endpoint), mood: roster.mood(endpoint), speaking: speaking, size: size)
+    }
+
+    private func nodeChip(_ node: TernNode, _ roster: TernRoster) -> some View {
+        HStack(spacing: 5) {
+            nodeFace(node, roster, size: 16)
+            speakerLabel(node, roster)
         }
     }
 
@@ -721,6 +1067,7 @@ struct TernView: View {
                 .padding(.horizontal, 10).padding(.vertical, 7)
                 .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color.white.opacity(0.08)))
                 .disabled(!agent.open)
+                .focused($composing)
                 .onSubmit { send(to: agent) }
                 .accessibilityLabel("Message \(agentName(agent))")
             Button { send(to: agent) } label: {
@@ -783,32 +1130,59 @@ struct TernView: View {
         Text(text.uppercased())
             .font(.system(size: 10, weight: .bold))
             .tracking(0.8)
+            .lineLimit(1)
+            .fixedSize()
             .foregroundStyle(Color.white.opacity(0.45))
     }
 
     private func countBadge(_ count: Int, color: Color) -> some View {
         Text("\(count)")
             .font(.system(size: 10, weight: .bold, design: .rounded))
+            .monospacedDigit()
+            .lineLimit(1)
+            .fixedSize()
             .foregroundStyle(color)
             .padding(.horizontal, 6).padding(.vertical, 1)
             .background(Capsule().fill(color.opacity(0.14)))
     }
 
-    private func rowBackground(selected: Bool, hue: Color, base: Double) -> some View {
-        RoundedRectangle(cornerRadius: 10, style: .continuous)
-            .fill(selected ? hue.opacity(0.18) : Color.white.opacity(base))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(selected ? hue.opacity(0.55) : Color.clear, lineWidth: 1)
-            )
+    private func toolTag(_ name: String, hue: Color) -> some View {
+        Text(name)
+            .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+            .foregroundStyle(hue)
+            .lineLimit(1)
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .background(Capsule().fill(hue.opacity(0.14)))
+            .fixedSize()
     }
 
     // MARK: Helpers
 
-    private func select(_ pane: UInt64) {
-        state.selectedMessage = nil
-        if state.selectedPane != pane { state.draft = "" }
-        state.selectedPane = state.selectedPane == pane ? nil : pane
+    /// A fresh message from this endpoint is in flight: its face talks. Pulses expire, so this is finite.
+    private func speaking(_ endpoint: TernEndpoint) -> Bool {
+        !reduceMotion && traffic.speaking(endpoint)
+    }
+
+    /// A fresh message to this endpoint just arrived: its face perks up.
+    private func listening(_ endpoint: TernEndpoint) -> Bool {
+        !reduceMotion && traffic.listening(endpoint)
+    }
+
+    /// Pins a conversation (nil follows the latest) and returns to it from any detail.
+    private func show(_ id: TernConversation.ID?) {
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
+            state.selectedMessage = nil
+            state.selectedPane = nil
+            state.pinned = id
+        }
+    }
+
+    private func openAgent(_ pane: UInt64) {
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
+            state.selectedMessage = nil
+            if state.selectedPane != pane { state.draft = "" }
+            state.selectedPane = pane
+        }
     }
 
     private func send(to agent: TernAgent) {
@@ -824,184 +1198,278 @@ struct TernView: View {
         copied = token
     }
 
-    private func paneName(_ pane: UInt64, _ roster: TernRoster) -> String {
-        roster.agent(pane).map(agentName) ?? "External"
+    /// Chip names stay short so several conversations fit the strip; the full pair is in help and VoiceOver.
+    private func chipName(_ name: String) -> String {
+        name.count > 16 ? String(name.prefix(15)) + "…" : name
     }
 
-    private func nodeHue(_ node: TernNode, _ roster: TernRoster) -> Color {
-        roster.agent(node.pane) == nil ? Color.white.opacity(0.55) : agentHue(node.pane)
-    }
-
-    private func route(_ item: TernMessage, _ roster: TernRoster) -> String {
-        "\(nodeName(item.from, roster)) → \(nodeName(item.to, roster))"
-    }
-
-    private func nodeName(_ node: TernNode, _ roster: TernRoster) -> String {
-        let name = paneName(node.pane, roster)
-        return node.subagent.flatMap { $0.isEmpty ? nil : "\(name)/\($0)" } ?? name
+    private func route(_ item: TernMessage, _ roster: TernRoster, spoken: Bool = false) -> String {
+        let from = roster.fullName(TernEndpoint(item.from))
+        let to = roster.fullName(TernEndpoint(item.to))
+        return spoken ? "\(from) \(item.reply ? "replied to" : "to") \(to)" : "\(from) → \(to)"
     }
 }
 
 private enum DetailMode: Hashable {
-    case exchanges
+    case empty
+    case conversation(TernConversation.ID)
     case agent(UInt64)
     case message(TrafficEntry.ID)
 }
 
-// MARK: - Activity animation
+// MARK: - Agent avatars
 
-/// Compact equalizer for the notch wings: one bar per working agent in its identity color,
-/// spiking when fresh traffic arrives. The timeline pauses whenever nothing is happening.
-struct ActivityPulse: View {
-    let hues: [Color]
-    let arrivals: Int
-    var height: CGFloat = 14
+/// Real agent states an avatar can show. Avatars never invent feelings: each look maps to a state
+/// the stream reports (working, waiting on running subagents, idle, closed pane, watcher offline).
+enum AgentMood: Equatable {
+    case working
+    case waiting
+    case idle
+    case closed
+    case offline
+}
+
+/// Agent avatar: the Lucide `bot` glyph (lucide.dev, ISC license) in the agent's identity color,
+/// with its antenna and eyes animated natively. Working bots blink or wiggle their antenna now and
+/// then; orchestrators waiting on subagents tilt the antenna and glance aside; idle bots close their
+/// eyes; closed panes show Lucide `bot-off`. While a fresh message travels, the sender hops and its
+/// antenna tip lights up, and the recipient's eyes widen. Reduce Motion stops all of this motion.
+struct AgentAvatar: View {
+    let hue: Color
+    let mood: AgentMood
+    var speaking = false
+    var listening = false
+    var size: CGFloat = 20
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var burstStart: Date?
+    @State private var blinking = false
+    @State private var wiggle: Double = 0
 
     var body: some View {
-        let bars = Array(hues.prefix(5))
-        let live = !reduceMotion && (!bars.isEmpty || burstStart != nil)
-        TimelineView(.animation(minimumInterval: 1.0 / 24, paused: !live)) { timeline in
-            Canvas { context, size in
-                let t = timeline.date.timeIntervalSinceReferenceDate
-                let burst = burstStart.map { max(0, 1 - timeline.date.timeIntervalSince($0) / 1.2) } ?? 0
-                let colors = bars.isEmpty ? Array(repeating: ternAccent, count: 3) : bars
-                for (index, color) in colors.enumerated() {
-                    let level: Double
-                    if bars.isEmpty {
-                        level = 0.2 + 0.7 * burst * (0.6 + 0.4 * sin(t * 9 + Double(index) * 1.4))
-                    } else if reduceMotion {
-                        level = 0.55
-                    } else {
-                        let wave = 0.5 + 0.5 * sin(t * (4.2 + Double(index) * 1.1) + Double(index) * 1.9)
-                        level = min(1, 0.25 + 0.6 * wave + 0.45 * burst)
-                    }
-                    let barHeight = max(3, size.height * level)
-                    let rect = CGRect(x: CGFloat(index) * 5.5, y: (size.height - barHeight) / 2, width: 3, height: barHeight)
-                    let opacity = bars.isEmpty ? 0.35 + 0.65 * burst : 1
-                    context.fill(Path(roundedRect: rect, cornerRadius: 1.5), with: .color(color.opacity(opacity)))
+        let lively = mood == .working && !reduceMotion
+        let line = StrokeStyle(lineWidth: max(1, size / 12), lineCap: .round, lineJoin: .round)
+        let ink = hue.opacity(awake ? 0.95 : 0.5)
+        let eyes = eyeShape
+        ZStack {
+            if mood == .closed {
+                LucideGlyph(part: .botOff).stroke(hue.opacity(0.5), style: line)
+            } else {
+                LucideGlyph(part: .botBody).fill(hue.opacity(awake ? 0.22 : 0.1))
+                LucideGlyph(part: .botFrame).stroke(ink, style: line)
+                ZStack {
+                    LucideGlyph(part: .antenna).stroke(ink, style: line)
+                    LucideGlyph(part: .antennaTip)
+                        .fill(hue)
+                        .opacity(speaking ? 1 : 0)
+                        .scaleEffect(speaking ? 1 : 0.2, anchor: UnitPoint(x: 8.0 / 24, y: 4.0 / 24))
                 }
+                .rotationEffect(.degrees(antennaAngle), anchor: UnitPoint(x: 0.5, y: 8.0 / 24))
+                BotEyes(width: eyes.width, height: eyes.height, shift: eyes.shift)
+                    .stroke(mood == .offline ? Color.orange : Color.white.opacity(awake ? 0.95 : 0.6), style: line)
             }
         }
-        .frame(width: CGFloat(max(bars.count, 3)) * 5.5 - 2.5, height: height)
-        .onChange(of: arrivals) { _, _ in
-            if !reduceMotion { burstStart = Date() }
-        }
-        .task(id: burstStart) {
-            guard burstStart != nil else { return }
-            try? await Task.sleep(for: .seconds(1.2))
-            if !Task.isCancelled { burstStart = nil }
+        .frame(width: size, height: size)
+        .offset(y: speaking && !reduceMotion ? -size * 0.1 : 0)
+        .shadow(color: hue.opacity(mood == .working ? 0.55 : 0), radius: size * 0.2)
+        .animation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.72), value: mood)
+        .animation(reduceMotion ? nil : .spring(response: 0.24, dampingFraction: 0.5), value: speaking)
+        .animation(reduceMotion ? nil : .spring(response: 0.24, dampingFraction: 0.6), value: listening)
+        .task(id: lively) {
+            guard lively else { blinking = false; wiggle = 0; return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(Double.random(in: 2.4...5.0)))
+                if Task.isCancelled { break }
+                if Bool.random() {
+                    withAnimation(.easeInOut(duration: 0.07)) { blinking = true }
+                    try? await Task.sleep(for: .milliseconds(110))
+                    withAnimation(.easeInOut(duration: 0.09)) { blinking = false }
+                } else {
+                    for angle in [-18.0, 13, -7, 0] {
+                        withAnimation(.spring(response: 0.16, dampingFraction: 0.5)) { wiggle = angle }
+                        try? await Task.sleep(for: .milliseconds(120))
+                    }
+                }
+            }
+            blinking = false
+            wiggle = 0
         }
         .accessibilityHidden(true)
     }
-}
 
-private enum FlowNode: Hashable {
-    case pane(UInt64)
-    case subagent(UInt64, String)
-    case idleGroup
-}
+    private var awake: Bool { mood == .working || mood == .waiting || speaking || listening }
 
-private struct FlowAnchorsKey: PreferenceKey {
-    static let defaultValue: [FlowNode: Anchor<CGPoint>] = [:]
-    static func reduce(value: inout [FlowNode: Anchor<CGPoint>], nextValue: () -> [FlowNode: Anchor<CGPoint>]) {
-        value.merge(nextValue(), uniquingKeysWith: { $1 })
+    /// Waiting orchestrators tilt the antenna toward the subagents they are waiting on.
+    private var antennaAngle: Double { (mood == .waiting && !speaking ? 14 : 0) + wiggle }
+
+    /// Eye strokes in Lucide's 24-unit grid: open eyes are 2-unit vertical lines (as in `bot`),
+    /// closed eyes are 2-unit horizontal lines, wide eyes are taller, blinking eyes nearly vanish.
+    private var eyeShape: (width: CGFloat, height: CGFloat, shift: CGFloat) {
+        let shift: CGFloat = mood == .waiting && !speaking && !listening ? 1.2 : 0
+        if listening { return (0, 3.4, 0) }
+        if !awake && mood != .offline { return (2, 0, 0) }
+        if blinking { return (0, 0.2, shift) }
+        return (0, 2, shift)
     }
 }
 
-/// Draws working halos around active agent dots and fresh messages as comets arcing through the
-/// rail gutter from sender to recipient, ending in an arrival ripple. Endpoints naming a subagent
-/// resolve to that subagent's strip dot when visible; traffic that still lands on one point (parent
-/// and an unlisted subagent sharing a pane) loops out of the halo and back. Renders nothing (and runs
-/// no timeline) when no agent is working, no fresh traffic exists, or Reduce Motion is on.
-private struct FlowOverlay: View {
-    let anchors: [FlowNode: Anchor<CGPoint>]
-    let working: [UInt64]
-    let pulses: [TrafficPulse]
-    let hiddenIdle: Set<UInt64>
+/// Lucide icon geometry in its 24 × 24 grid, scaled to fit the frame. Paths follow lucide `bot` and
+/// `bot-off` (stroke 2, round caps and joins), split into parts so each can animate on its own.
+private struct LucideGlyph: Shape {
+    enum Part { case botBody, botFrame, antenna, antennaTip, botOff }
+    let part: Part
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        switch part {
+        case .botBody: Self.botBody(&path)
+        case .botFrame: Self.botFrame(&path)
+        case .antenna: Self.antenna(&path)
+        case .antennaTip: Self.antennaTip(&path)
+        case .botOff: Self.botOff(&path)
+        }
+        return path.applying(Self.transform(rect))
+    }
+
+    static func transform(_ rect: CGRect) -> CGAffineTransform {
+        let scale = min(rect.width, rect.height) / 24
+        return CGAffineTransform(translationX: rect.midX - 12 * scale, y: rect.midY - 12 * scale).scaledBy(x: scale, y: scale)
+    }
+
+    /// `<rect width="16" height="12" x="4" y="8" rx="2"/>`
+    static func botBody(_ path: inout Path) {
+        path.addRoundedRect(in: CGRect(x: 4, y: 8, width: 16, height: 12), cornerSize: CGSize(width: 2, height: 2))
+    }
+
+    /// Body plus `M2 14h2` and `M20 14h2`.
+    static func botFrame(_ path: inout Path) {
+        botBody(&path)
+        path.move(to: CGPoint(x: 2, y: 14)); path.addLine(to: CGPoint(x: 4, y: 14))
+        path.move(to: CGPoint(x: 20, y: 14)); path.addLine(to: CGPoint(x: 22, y: 14))
+    }
+
+    /// `M12 8V4H8`
+    static func antenna(_ path: inout Path) {
+        path.move(to: CGPoint(x: 12, y: 8))
+        path.addLine(to: CGPoint(x: 12, y: 4))
+        path.addLine(to: CGPoint(x: 8, y: 4))
+    }
+
+    static func antennaTip(_ path: inout Path) {
+        path.addEllipse(in: CGRect(x: 6.4, y: 2.4, width: 3.2, height: 3.2))
+    }
+
+    /// Lucide `bot-off`.
+    static func botOff(_ path: inout Path) {
+        path.move(to: CGPoint(x: 13.67, y: 8))
+        path.addArc(tangent1End: CGPoint(x: 20, y: 8), tangent2End: CGPoint(x: 20, y: 14.33), radius: 2)
+        path.addLine(to: CGPoint(x: 20, y: 14.33))
+        path.move(to: CGPoint(x: 2, y: 14)); path.addLine(to: CGPoint(x: 4, y: 14))
+        path.move(to: CGPoint(x: 20, y: 14)); path.addLine(to: CGPoint(x: 22, y: 14))
+        path.move(to: CGPoint(x: 22, y: 22)); path.addLine(to: CGPoint(x: 2, y: 2))
+        path.move(to: CGPoint(x: 8, y: 8))
+        path.addArc(tangent1End: CGPoint(x: 4, y: 8), tangent2End: CGPoint(x: 4, y: 20), radius: 2)
+        path.addArc(tangent1End: CGPoint(x: 4, y: 20), tangent2End: CGPoint(x: 20, y: 20), radius: 2)
+        path.addLine(to: CGPoint(x: 18, y: 20))
+        path.addArc(center: CGPoint(x: 18, y: 18), radius: 2, startAngle: .degrees(90), endAngle: .degrees(45), clockwise: true)
+        path.move(to: CGPoint(x: 9, y: 13)); path.addLine(to: CGPoint(x: 9, y: 15))
+        path.move(to: CGPoint(x: 9.67, y: 4)); path.addLine(to: CGPoint(x: 12, y: 4)); path.addLine(to: CGPoint(x: 12, y: 6.33))
+    }
+}
+
+/// The two eyes of Lucide `bot` (`M9 13v2`, `M15 13v2`), animatable between open, closed, wide, and glancing.
+private struct BotEyes: Shape {
+    var width: CGFloat
+    var height: CGFloat
+    var shift: CGFloat
+
+    var animatableData: AnimatablePair<AnimatablePair<CGFloat, CGFloat>, CGFloat> {
+        get { AnimatablePair(AnimatablePair(width, height), shift) }
+        set { width = newValue.first.first; height = newValue.first.second; shift = newValue.second }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        for x: CGFloat in [9, 15] {
+            let center = x + shift
+            path.move(to: CGPoint(x: center - width / 2, y: 14 - height / 2))
+            path.addLine(to: CGPoint(x: center + width / 2, y: 14 + height / 2))
+        }
+        return path.applying(LucideGlyph.transform(rect))
+    }
+}
+
+/// The line between the two participants in the open header. While a fresh message of the shown
+/// conversation is alive, a comet in the sender's color crosses it toward the recipient and lands
+/// in a ripple. A timeline runs only while a comet is alive; Reduce Motion leaves the still line.
+private struct LinkLine: View {
+    struct Comet {
+        let started: Date
+        /// From the left participant to the right one.
+        let forward: Bool
+        let color: Color
+    }
+
+    let comets: [Comet]
+    let leftHue: Color
+    let rightHue: Color
     let reduceMotion: Bool
 
     var body: some View {
-        GeometryReader { proxy in
-            if !reduceMotion && (!working.isEmpty || !pulses.isEmpty) {
-                let points = anchors.mapValues { proxy[$0] }
+        ZStack {
+            Canvas { context, size in
+                let y = size.height / 2
+                var line = Path()
+                line.move(to: CGPoint(x: 4, y: y))
+                line.addLine(to: CGPoint(x: size.width - 4, y: y))
+                let shading = GraphicsContext.Shading.linearGradient(
+                    Gradient(colors: [leftHue.opacity(0.5), rightHue.opacity(0.5)]),
+                    startPoint: CGPoint(x: 0, y: y), endPoint: CGPoint(x: size.width, y: y))
+                context.stroke(line, with: shading, style: StrokeStyle(lineWidth: 1.2, lineCap: .round, dash: [2, 4]))
+            }
+            if !reduceMotion && !comets.isEmpty {
                 TimelineView(.animation(minimumInterval: 1.0 / 30)) { timeline in
-                    Canvas { context, _ in
-                        let now = timeline.date
-                        for pane in working {
-                            if let point = points[.pane(pane)] { drawHalo(&context, at: point, pane: pane, time: now.timeIntervalSinceReferenceDate) }
-                        }
-                        for pulse in pulses {
-                            let progress = now.timeIntervalSince(pulse.started) / TernTraffic.pulseDuration
-                            guard progress >= 0, progress < 1,
-                                  let start = point(pulse.from, pulse.fromSubagent, points),
-                                  let end = point(pulse.to, pulse.toSubagent, points) else { continue }
-                            drawPulse(&context, pulse: pulse, from: start, to: end, progress: progress)
+                    Canvas { context, size in
+                        for comet in comets {
+                            let progress = timeline.date.timeIntervalSince(comet.started) / TernTraffic.pulseDuration
+                            guard progress >= 0, progress < 1 else { continue }
+                            draw(&context, comet, size: size, progress: progress)
                         }
                     }
                 }
             }
         }
         .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 
-    private func point(_ pane: UInt64, _ subagent: String?, _ points: [FlowNode: CGPoint]) -> CGPoint? {
-        if let subagent = subagent, let dot = points[.subagent(pane, subagent)] { return dot }
-        return points[.pane(pane)] ?? (hiddenIdle.contains(pane) ? points[.idleGroup] : nil)
-    }
-
-    private func drawHalo(_ context: inout GraphicsContext, at point: CGPoint, pane: UInt64, time: TimeInterval) {
-        let hue = agentHue(pane)
-        for ring in 0..<2 {
-            let phase = (time * 0.7 + Double(ring) * 0.5 + Double(pane % 7) * 0.13).truncatingRemainder(dividingBy: 1)
-            let radius = 5 + 8 * phase
-            let rect = CGRect(x: point.x - radius, y: point.y - radius, width: radius * 2, height: radius * 2)
-            context.stroke(Path(ellipseIn: rect), with: .color(hue.opacity(0.55 * (1 - phase))), lineWidth: 1.2)
-        }
-    }
-
-    private func drawPulse(_ context: inout GraphicsContext, pulse: TrafficPulse, from start: CGPoint, to end: CGPoint, progress: Double) {
-        let color = pulse.failed ? Color.red : agentHue(pulse.from)
+    private func draw(_ context: inout GraphicsContext, _ comet: Comet, size: CGSize, progress: Double) {
+        let y = size.height / 2
+        let start = CGPoint(x: comet.forward ? 4 : size.width - 4, y: y)
+        let end = CGPoint(x: comet.forward ? size.width - 4 : 4, y: y)
         var arc = Path()
         arc.move(to: start)
-        if abs(start.y - end.y) < 2 && abs(start.x - end.x) < 2 {
-            // Same-pane exchange with no distinct subagent anchor: a loop out into the row and back,
-            // clockwise toward a subagent and counter-clockwise for replies to the parent.
-            let turn: CGFloat = pulse.toSubagent != nil ? 1 : -1
-            arc.addCurve(to: end, control1: CGPoint(x: start.x + 34, y: start.y - 20 * turn),
-                         control2: CGPoint(x: start.x + 34, y: start.y + 20 * turn))
-        } else if abs(start.x - end.x) > abs(start.y - end.y) {
-            // Parent halo to its own subagent dot within the row: bow above the row.
-            arc.addQuadCurve(to: end, control: CGPoint(x: (start.x + end.x) / 2, y: min(start.y, end.y) - 14))
-        } else {
-            let control = CGPoint(x: max(2, min(start.x, end.x) - 10 - abs(end.y - start.y) * 0.25), y: (start.y + end.y) / 2)
-            arc.addQuadCurve(to: end, control: control)
-        }
-        context.stroke(arc, with: .color(color.opacity(0.32 * (1 - progress))),
-                       style: StrokeStyle(lineWidth: 1.2, lineCap: .round, dash: [2, 4]))
+        arc.addQuadCurve(to: end, control: CGPoint(x: size.width / 2, y: y - size.height * 0.4))
         if progress < 0.3 {
-            drawRipple(&context, at: start, color: color, progress: progress / 0.3 * 0.6)
+            drawRipple(&context, at: start, color: comet.color, progress: progress / 0.3 * 0.6)
         }
         let travel = min(1, progress / 0.72)
         if travel < 1 {
             let head = travel * travel * (3 - 2 * travel)
             let trail = arc.trimmedPath(from: max(0, head - 0.3), to: head)
-            context.stroke(trail, with: .color(color.opacity(0.9)), style: StrokeStyle(lineWidth: 2.2, lineCap: .round))
+            context.stroke(trail, with: .color(comet.color.opacity(0.9)), style: StrokeStyle(lineWidth: 2.2, lineCap: .round))
             if let tip = arc.trimmedPath(from: 0, to: max(0.001, head)).currentPoint {
-                context.fill(Path(ellipseIn: CGRect(x: tip.x - 6, y: tip.y - 6, width: 12, height: 12)), with: .color(color.opacity(0.28)))
-                context.fill(Path(ellipseIn: CGRect(x: tip.x - 2.6, y: tip.y - 2.6, width: 5.2, height: 5.2)), with: .color(.white))
+                context.fill(Path(ellipseIn: CGRect(x: tip.x - 5, y: tip.y - 5, width: 10, height: 10)), with: .color(comet.color.opacity(0.28)))
+                context.fill(Path(ellipseIn: CGRect(x: tip.x - 2.4, y: tip.y - 2.4, width: 4.8, height: 4.8)), with: .color(.white))
             }
         }
         if progress > 0.62 {
-            drawRipple(&context, at: end, color: color, progress: (progress - 0.62) / 0.38)
+            drawRipple(&context, at: end, color: comet.color, progress: (progress - 0.62) / 0.38)
         }
     }
 
     private func drawRipple(_ context: inout GraphicsContext, at point: CGPoint, color: Color, progress: Double) {
-        let radius = 3 + 12 * progress
+        let radius = 2 + 8 * progress
         let rect = CGRect(x: point.x - radius, y: point.y - radius, width: radius * 2, height: radius * 2)
-        context.stroke(Path(ellipseIn: rect), with: .color(color.opacity(0.85 * (1 - progress))), lineWidth: 1.6)
+        context.stroke(Path(ellipseIn: rect), with: .color(color.opacity(0.85 * (1 - progress))), lineWidth: 1.4)
     }
 }
 
@@ -1087,16 +1555,29 @@ private func agentStatus(_ agent: TernAgent) -> String {
     return "idle"
 }
 
-private func activityLine(_ agent: TernAgent) -> String {
-    if let tool = agent.tool {
-        let intent = tool.intent.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !intent.isEmpty { return tool.name.isEmpty ? intent : "\(tool.name) · \(intent)" }
-        if !tool.name.isEmpty { return tool.name }
-    }
+func agentMood(_ agent: TernAgent) -> AgentMood {
+    if !agent.open { return .closed }
+    if agent.working { return .working }
+    if agent.subagents.contains(where: \.running) { return .waiting }
+    return .idle
+}
+
+/// The agent's current action in plain words: its reported tool intent first, then what it waits on.
+private func intentLine(_ agent: TernAgent) -> String {
+    let intent = agent.tool?.intent.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    if !intent.isEmpty { return intent }
     let running = agent.subagents.filter(\.running).count
-    if !agent.working && running > 0 { return "waiting on \(running) subagent\(running == 1 ? "" : "s")" }
+    if !agent.working && running > 0 { return "Waiting on \(running) subagent\(running == 1 ? "" : "s")" }
+    if let name = agent.tool?.name, !name.isEmpty { return "Running \(name)" }
     if !agent.description.isEmpty { return agent.description }
-    return agent.working ? "working" : "idle"
+    return agent.working ? "Working" : "Idle"
+}
+
+/// Tool name shown as a tag beside an intent; omitted when the intent line already names the tool.
+private func toolTagName(_ agent: TernAgent) -> String? {
+    guard let tool = agent.tool, !tool.name.isEmpty,
+          !tool.intent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+    return tool.name
 }
 
 private func agentHeadline(_ agent: TernAgent) -> String {

@@ -16,8 +16,8 @@ struct NotchMetrics: Equatable {
     var cameraWidth: CGFloat = 0
     /// Camera housing (or menu bar) height. The collapsed silhouette is exactly this tall.
     var headerHeight: CGFloat = 32
-    var collapsedWidth: CGFloat = 190
-    var expandedSize = CGSize(width: 760, height: 440)
+    var collapsedWidth: CGFloat = 2 * NotchStyle.wing + NotchStyle.fauxCameraGap
+    var expandedSize = CGSize(width: NotchStyle.expandedWidth, height: NotchStyle.expandedHeight)
 }
 
 final class NotchModel: ObservableObject {
@@ -27,16 +27,21 @@ final class NotchModel: ObservableObject {
     @Published var centerOffset: CGFloat = 0
 }
 
-private enum NotchStyle {
-    /// Width of each black wing beside the camera housing while collapsed.
-    static let wing: CGFloat = 74
+enum NotchStyle {
+    /// Width of each black wing beside the camera housing while collapsed: the silhouette's top flare,
+    /// clear room at the outer edge, an avatar, and `wingInset` next to the camera.
+    static let wing: CGFloat = 36
+    /// Space between the camera housing and each collapsed avatar.
+    static let wingInset: CGFloat = 2
+    /// Stand-in camera gap on displays without a notch.
+    static let fauxCameraGap: CGFloat = 12
     /// Transparent window margin around the expanded silhouette for its drop shadow.
     static let margin: CGFloat = 30
-    static let expandedWidth: CGFloat = 760
-    static let expandedHeight: CGFloat = 440
+    static let expandedWidth: CGFloat = 820
+    static let expandedHeight: CGFloat = 520
     static let collapsedRadii = (top: CGFloat(6), bottom: CGFloat(10))
-    static let expandedRadii = (top: CGFloat(14), bottom: CGFloat(28))
-    static let contentInset: CGFloat = 30
+    static let expandedRadii = (top: CGFloat(14), bottom: CGFloat(26))
+    static let contentInset: CGFloat = 24
 }
 
 @MainActor
@@ -46,13 +51,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let viewState = TernViewState()
     private lazy var traffic = TernTraffic(store: store)
     private var panel: NotchPanel?
-    private var statusItem: NSStatusItem?
-    private var toggleMenuItem: NSMenuItem?
     private var pendingShrink: DispatchWorkItem?
     private var screenFrame = NSRect.zero
     private var notchCenterX: CGFloat = 0
-    /// Requested state; `model.expanded` follows it one run-loop turn later when opening.
-    private var wantsExpanded = false
+    /// Owns the requested open state; `model.expanded` follows it one run-loop turn later when opening.
+    private let hover = NotchHoverPolicy()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let panel = NotchPanel(
@@ -72,34 +75,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         panel.isReleasedWhenClosed = false
         panel.onCancel = { [weak self] in self?.back() }
+        panel.onClick = { [weak self] in self?.hover.clicked() }
+        hover.apply = { [weak self] effect in self?.apply(effect) }
+        hover.pointerOverCollapsed = { [weak self] in
+            guard let self = self else { return false }
+            return self.collapsedRect().contains(NSEvent.mouseLocation)
+        }
 
         let root = NotchRootView(
             store: store,
             traffic: traffic,
             model: model,
             viewState: viewState,
-            toggle: { [weak self] in self?.toggle() },
-            collapse: { [weak self] in self?.setExpanded(false) }
+            toggle: { [weak self] in self?.hover.toggle() },
+            collapse: { [weak self] in self?.hover.setExpanded(false) },
+            hover: { [weak self] inside in self?.hover.pointerChanged(inside: inside) }
         )
         let hostingView = NotchHostingView(rootView: root)
-        // The panel frame drives layout; SwiftUI must not resize the window to its ideal size.
+        // The panel frame drives layout; SwiftUI must never resize the window. As a window's content
+        // view, NSHostingView resizes its window from `windowDidLayout`, and at the top of a notched
+        // screen each resize changes the safe-area insets, which re-invalidates the hosting view until
+        // AppKit aborts with "more Update Constraints in Window passes than there are views". Hosting
+        // inside a plain container with autoresizing, ignoring safe areas, keeps geometry window-owned.
         hostingView.sizingOptions = []
-        panel.contentView = hostingView
+        hostingView.safeAreaRegions = []
+        hostingView.translatesAutoresizingMaskIntoConstraints = true
+        hostingView.autoresizingMask = []
+        let container = NotchContainerView()
+        container.addSubview(hostingView)
+        hostingView.frame = container.bounds
+        panel.contentView = container
         self.panel = panel
-
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.image = NSImage(systemSymbolName: "rectangle.topthird.inset.filled", accessibilityDescription: "Tern Notch")
-        let menu = NSMenu()
-        let toggleItem = NSMenuItem(title: "Open Tern Notch", action: #selector(toggleFromMenu), keyEquivalent: "")
-        toggleItem.target = self
-        menu.addItem(toggleItem)
-        menu.addItem(.separator())
-        let quitItem = NSMenuItem(title: "Quit Tern Notch", action: #selector(quit), keyEquivalent: "q")
-        quitItem.target = self
-        menu.addItem(quitItem)
-        item.menu = menu
-        statusItem = item
-        toggleMenuItem = toggleItem
 
         NotificationCenter.default.addObserver(self, selector: #selector(screenParametersChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
         store.start()
@@ -111,56 +117,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         store.stop()
     }
 
-    /// Clicking anywhere outside the notch folds it back into the camera housing.
+    /// Clicking anywhere outside the notch folds it back into the camera housing. A hover-opened
+    /// notch never activated the app, so this only fires after a click or keyboard open.
     func applicationDidResignActive(_ notification: Notification) {
-        setExpanded(false)
+        hover.setExpanded(false)
     }
 
-    @objc private func toggleFromMenu() { toggle() }
-    @objc private func quit() { NSApplication.shared.terminate(nil) }
     @objc private func screenParametersChanged() {
         positionPanel()
         panel?.orderFrontRegardless()
     }
 
-    private func toggle() { setExpanded(!wantsExpanded) }
-
-    /// Esc steps back from message to agent to overview, then collapses.
+    /// Esc steps back from message to agent to pinned conversation, then collapses.
     private func back() {
-        guard wantsExpanded else { return }
+        guard hover.expanded else { return }
         let reduce = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         var handled = false
         withAnimation(reduce ? nil : .easeInOut(duration: 0.18)) { handled = viewState.back() }
-        if !handled { setExpanded(false) }
+        if !handled { hover.setExpanded(false) }
     }
 
-    private func setExpanded(_ expanded: Bool) {
-        guard wantsExpanded != expanded else { return }
-        wantsExpanded = expanded
-        toggleMenuItem?.title = expanded ? "Close Tern Notch" : "Open Tern Notch"
+    private func collapsedRect() -> NSRect {
+        let metrics = model.metrics
+        return NSRect(x: notchCenterX - metrics.collapsedWidth / 2, y: screenFrame.maxY - metrics.headerHeight,
+                      width: metrics.collapsedWidth, height: metrics.headerHeight)
+    }
+
+    // MARK: Expansion
+
+    /// Carries out the hover policy's decisions. An unpinned open (from hover) only orders the
+    /// panel front: it never activates the app or takes key focus, so typing stays in the frontmost app.
+    private func apply(_ effect: NotchHoverPolicy.Effect) {
         let reduce = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        pendingShrink?.cancel()
-        pendingShrink = nil
-        if expanded {
-            // Grow the transparent window first so the silhouette can unfold inside it without
-            // shifting, then animate on the next turn after the resized layout has landed.
-            applyFrame(large: true)
+        switch effect {
+        case .pin:
             NSApplication.shared.activate(ignoringOtherApps: true)
             panel?.makeKeyAndOrderFront(nil)
+        case .expand(let pinned):
+            pendingShrink?.cancel()
+            pendingShrink = nil
+            // Reveal the fixed-size hosting canvas before unfolding the silhouette.
+            applyFrame(large: true)
+            if pinned {
+                NSApplication.shared.activate(ignoringOtherApps: true)
+                panel?.makeKeyAndOrderFront(nil)
+            } else {
+                panel?.orderFrontRegardless()
+            }
             DispatchQueue.main.async { [weak self] in
-                guard let self = self, self.wantsExpanded else { return }
+                guard let self = self, self.hover.expanded else { return }
                 withAnimation(reduce ? .easeOut(duration: 0.12) : .spring(response: 0.42, dampingFraction: 0.84)) {
                     self.model.expanded = true
                 }
             }
-        } else {
+        case .collapse:
+            pendingShrink?.cancel()
             withAnimation(reduce ? .easeOut(duration: 0.12) : .spring(response: 0.34, dampingFraction: 0.92)) {
                 model.expanded = false
             }
             // Shrink the window back to the collapsed silhouette once the fold finishes, so the
             // transparent margin never blocks clicks on the menu bar.
             let task = DispatchWorkItem { [weak self] in
-                guard let self = self, !self.wantsExpanded else { return }
+                guard let self = self, !self.hover.expanded else { return }
                 self.pendingShrink = nil
                 self.applyFrame(large: false)
                 self.panel?.orderFrontRegardless()
@@ -193,7 +211,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let menuBarHeight = frame.maxY - screen.visibleFrame.maxY
         let headerHeight = cameraWidth > 0 ? screen.safeAreaInsets.top : min(max(menuBarHeight, 24), 32)
-        let collapsedWidth = cameraWidth > 0 ? cameraWidth + 2 * NotchStyle.wing : 190
+        let collapsedWidth = (cameraWidth > 0 ? cameraWidth : NotchStyle.fauxCameraGap) + 2 * NotchStyle.wing
         let width = max(collapsedWidth, min(NotchStyle.expandedWidth, frame.width - 2 * NotchStyle.margin))
         let available = frame.maxY - screen.visibleFrame.minY - NotchStyle.margin
         let height = max(headerHeight + 120, min(NotchStyle.expandedHeight, available))
@@ -206,7 +224,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if model.metrics != metrics { model.metrics = metrics }
         screenFrame = frame
         notchCenterX = centerX
-        applyFrame(large: wantsExpanded || pendingShrink != nil)
+        applyFrame(large: hover.expanded || pendingShrink != nil)
     }
 
     /// The window's top edge is always the physical top of the screen, centered on the camera.
@@ -219,19 +237,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let x = min(max(notchCenterX - size.width / 2, screenFrame.minX), screenFrame.maxX - size.width)
         let offset = notchCenterX - (x + size.width / 2)
         if model.centerOffset != offset { model.centerOffset = offset }
-        panel.setFrame(NSRect(x: x, y: screenFrame.maxY - size.height, width: size.width, height: size.height), display: true, animate: false)
+        panel.disableScreenUpdatesUntilFlush()
+        if let container = panel.contentView as? NotchContainerView {
+            container.canvasSize = CGSize(width: metrics.expandedSize.width + 2 * NotchStyle.margin,
+                                          height: metrics.expandedSize.height + NotchStyle.margin)
+        }
+        panel.setFrame(NSRect(x: x, y: screenFrame.maxY - size.height, width: size.width, height: size.height), display: false, animate: false)
+        panel.contentView?.layoutSubtreeIfNeeded()
+        panel.displayIfNeeded()
     }
 }
 
 private final class NotchPanel: NSPanel {
     var onCancel: (() -> Void)?
+    /// Fires before a click is dispatched, so a hover-opened notch can pin itself.
+    var onClick: (() -> Void)?
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
     override func cancelOperation(_ sender: Any?) { onCancel?() }
+    /// Cmd-Q quits while the notch is key; the app has no menu bar item or visible app menu.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "q" {
+            NSApplication.shared.terminate(nil)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+    override func sendEvent(_ event: NSEvent) {
+        switch event.type {
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown: onClick?()
+        default: break
+        }
+        super.sendEvent(event)
+    }
 }
 
 private final class NotchHostingView<Content: View>: NSHostingView<Content> {
     /// The first click on the notch acts immediately, even while another app is active.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+/// Plain content view that owns the hosting view's geometry; it also takes the first click.
+private final class NotchContainerView: NSView {
+    // Keep SwiftUI's coordinate space unchanged across window resizes. The smaller window
+    // clips this canvas while collapsed; both stay centered and anchored at the screen top.
+    var canvasSize = CGSize.zero {
+        didSet { positionCanvas() }
+    }
+
+    override func resizeSubviews(withOldSize oldSize: NSSize) {
+        positionCanvas()
+    }
+
+    private func positionCanvas() {
+        subviews.first?.frame = NSRect(x: (bounds.width - canvasSize.width) / 2,
+                                      y: bounds.height - canvasSize.height,
+                                      width: canvasSize.width, height: canvasSize.height)
+    }
+
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
@@ -270,27 +334,28 @@ struct NotchSilhouette: Shape {
 
 private struct NotchRootView: View {
     @ObservedObject var store: TernStreamStore
-    @ObservedObject var traffic: TernTraffic
+    let traffic: TernTraffic
     @ObservedObject var model: NotchModel
     let viewState: TernViewState
     let toggle: () -> Void
     let collapse: () -> Void
+    let hover: (Bool) -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AppStorage(TernPreferences.showSubagents) private var showSubagents = false
 
     var body: some View {
         let metrics = model.metrics
         let expanded = model.expanded
-        let roster = TernRoster(store.agents)
         let radii = expanded ? NotchStyle.expandedRadii : NotchStyle.collapsedRadii
         let shape = NotchSilhouette(topRadius: radii.top, bottomRadius: radii.bottom)
         let size = expanded ? metrics.expandedSize : CGSize(width: metrics.collapsedWidth, height: metrics.headerHeight)
         VStack(spacing: 0) {
-            header(metrics, roster, expanded: expanded)
+            header(metrics, expanded: expanded)
             if expanded {
                 // Fixed final size: the silhouette unfolds over already-laid-out content instead of reflowing it.
                 TernView(store: store, traffic: traffic, state: viewState)
                     .frame(width: metrics.expandedSize.width - 2 * NotchStyle.contentInset,
-                           height: max(0, metrics.expandedSize.height - metrics.headerHeight - 20),
+                           height: max(0, metrics.expandedSize.height - metrics.headerHeight - 18),
                            alignment: .top)
                     .padding(.top, 4)
                     .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: -12)))
@@ -303,91 +368,66 @@ private struct NotchRootView: View {
                 .shadow(color: Color.black.opacity(expanded ? 0.55 : 0), radius: 18, y: 10)
         )
         .contentShape(shape)
+        // Hover tracks the silhouette only, never the transparent shadow margin around it.
+        .onHover(perform: hover)
         .offset(x: model.centerOffset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .foregroundStyle(Color.white)
         .preferredColorScheme(.dark)
+        // A pin whose conversation left the index (filter change, reconnect) returns both states to live.
+        .onReceive(traffic.$conversations) { conversations in
+            if let pinned = viewState.pinned, !conversations.contains(where: { $0.id == pinned }) { viewState.pinned = nil }
+        }
     }
 
     @ViewBuilder
-    private func header(_ metrics: NotchMetrics, _ roster: TernRoster, expanded: Bool) -> some View {
-        let gap = metrics.cameraWidth > 0 ? metrics.cameraWidth : 12
-        let hues = roster.active.map { agentHue($0.pane) }
+    private func header(_ metrics: NotchMetrics, expanded: Bool) -> some View {
+        let gap = metrics.cameraWidth > 0 ? metrics.cameraWidth : NotchStyle.fauxCameraGap
         if expanded {
+            let roster = TernRoster(store.agents)
             HStack(spacing: 0) {
                 HStack(spacing: 8) {
-                    ActivityPulse(hues: hues, arrivals: traffic.arrivals)
-                    Text("tern").font(.system(size: 13, weight: .bold, design: .rounded))
+                    Text("tern").font(.system(size: 13, weight: .bold, design: .rounded)).fixedSize()
                     liveBadge
+                    Text("\(roster.active.count) working · \(roster.idle.count) idle")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.62))
+                        .lineLimit(1)
                     Spacer(minLength: 0)
                 }
                 .frame(maxWidth: .infinity)
                 Color.clear.frame(width: gap)
                 HStack(spacing: 8) {
                     Spacer(minLength: 0)
-                    Text("\(roster.active.count) working · \(roster.idle.count) idle")
-                        .font(.system(size: 11.5, weight: .medium))
-                        .foregroundStyle(Color.white.opacity(0.62))
-                        .lineLimit(1)
+                    subagentsToggle
                     iconButton("arrow.clockwise", label: "Restart watcher") { store.restart() }
                     iconButton("chevron.up", label: "Collapse Tern Notch", action: collapse)
+                    iconButton("power", label: "Quit Tern Notch") { NSApplication.shared.terminate(nil) }
                 }
                 .frame(maxWidth: .infinity)
             }
             .padding(.horizontal, NotchStyle.contentInset - 4)
             .frame(height: metrics.headerHeight)
             .contentShape(Rectangle())
-            .onTapGesture(perform: collapse)
+            .onTapGesture(perform: toggle)
             .transition(.opacity)
         } else {
-            Button(action: toggle) {
-                HStack(spacing: 0) {
-                    ActivityPulse(hues: hues, arrivals: traffic.arrivals)
-                        .frame(maxWidth: .infinity)
-                    Color.clear.frame(width: gap)
-                    collapsedStatus(roster)
-                        .frame(maxWidth: .infinity)
-                }
-                .padding(.horizontal, NotchStyle.collapsedRadii.top + 2)
-                .frame(height: metrics.headerHeight)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Open Tern Notch")
-            .accessibilityValue(status(roster))
-            .help("Open Tern orchestration · \(status(roster))")
-            .transition(.opacity)
+            CollapsedHeader(store: store, traffic: traffic, state: viewState, gap: gap, height: metrics.headerHeight, action: toggle)
+                .transition(.opacity)
         }
     }
 
-    @ViewBuilder
-    private func collapsedStatus(_ roster: TernRoster) -> some View {
-        let fresh = traffic.pulses.count
-        Group {
-            if !store.isRunning || store.error != nil {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Color.orange)
-            } else if fresh > 0 && !reduceMotion {
-                HStack(spacing: 3) {
-                    Image(systemName: "arrow.left.arrow.right").font(.system(size: 9.5, weight: .bold))
-                    Text("+\(fresh)").font(.system(size: 11.5, weight: .bold, design: .rounded))
-                }
-                .foregroundStyle(traffic.pulses.contains(where: \.failed) ? Color.red : ternAccent)
-                .transition(.scale(scale: 0.6).combined(with: .opacity))
-            } else {
-                HStack(alignment: .firstTextBaseline, spacing: 1) {
-                    Text("\(roster.active.count)")
-                        .font(.system(size: 12.5, weight: .bold, design: .rounded))
-                        .foregroundStyle(roster.active.isEmpty ? Color.white.opacity(0.5) : Color.white)
-                    Text("/\(roster.openCount)")
-                        .font(.system(size: 10, weight: .medium, design: .rounded))
-                        .foregroundStyle(Color.white.opacity(0.4))
-                }
-                .transition(.opacity)
-            }
-        }
-        .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.7), value: fresh > 0)
+    /// Off: conversations are between top-level panes only. On: each subagent takes part on its own.
+    private var subagentsToggle: some View {
+        Toggle("Subagents", isOn: $showSubagents)
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .tint(ternAccent)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(Color.white.opacity(0.62))
+            .fixedSize()
+            .help(showSubagents ? "Subagents take part in conversations on their own" : "Show subagents as their own conversation participants")
+            .accessibilityHint("Shows subagents as their own conversation participants")
     }
 
     private var liveBadge: some View {
@@ -397,6 +437,7 @@ private struct NotchRootView: View {
                 .font(.system(size: 10.5, weight: .semibold))
                 .foregroundStyle(store.isRunning ? Color.green.opacity(0.85) : Color.orange)
         }
+        .fixedSize()
         .accessibilityElement(children: .combine)
     }
 
@@ -411,9 +452,161 @@ private struct NotchRootView: View {
         .help(label)
         .accessibilityLabel(label)
     }
+}
 
-    private func status(_ roster: TernRoster) -> String {
+/// Collapsed notch content, symmetric around the camera: one agent in each wing. The pair is the shown
+/// conversation (pinned, or the latest), on the same sides as in the open transcript; without any
+/// conversation it is the first two working agents, then idle ones. An empty wing holds a crew avatar.
+/// A hairline along the bottom edge joins the pair in their colors; a fresh message crosses it as a comet.
+private struct CollapsedHeader: View {
+    @ObservedObject var store: TernStreamStore
+    @ObservedObject var traffic: TernTraffic
+    @ObservedObject var state: TernViewState
+    let gap: CGFloat
+    let height: CGFloat
+    let action: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        let roster = TernRoster(store.agents)
+        let conversation = traffic.conversation(pinned: state.pinned)
+        let pair = endpoints(conversation, roster)
+        let leftHue = pair.left.map(roster.hue) ?? crewHue
+        let rightHue = pair.right.map(roster.hue) ?? crewHue
+        let comets = conversation.map { conversation in
+            traffic.pulses(in: conversation.id).map { pulse -> EdgeTrace.Comet in
+                let sender = TernEndpoint(pane: pulse.from, subagent: pulse.fromSubagent)
+                return EdgeTrace.Comet(started: pulse.started, forward: sender == conversation.left,
+                                       color: pulse.failed ? Color.red : roster.hue(sender))
+            }
+        } ?? []
+        Button(action: action) {
+            ZStack(alignment: .bottom) {
+                HStack(spacing: 0) {
+                    wing(pair.left, roster)
+                        .padding(.trailing, NotchStyle.wingInset)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                    Color.clear.frame(width: gap)
+                    wing(pair.right, roster)
+                        .padding(.leading, NotchStyle.wingInset)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(.horizontal, NotchStyle.collapsedRadii.top)
+                EdgeTrace(comets: comets, leftHue: leftHue, rightHue: rightHue, reduceMotion: reduceMotion)
+                    .padding(.horizontal, NotchStyle.collapsedRadii.top + NotchStyle.collapsedRadii.bottom)
+                    .frame(height: 8)
+            }
+            .frame(height: height)
+            .contentShape(Rectangle())
+            .animation(reduceMotion ? nil : .spring(response: 0.4, dampingFraction: 0.8), value: [pair.left, pair.right])
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Open Tern Notch")
+        .accessibilityValue(status(roster, pair))
+        .help("Tern · \(status(roster, pair))")
+    }
+
+    private var offline: Bool { !store.isRunning || store.error != nil }
+    private var crewHue: Color { offline ? Color.orange : ternAccent }
+    private var avatarSize: CGFloat { min(18, max(12, height - 13)) }
+
+    private func endpoints(_ conversation: TernConversation?, _ roster: TernRoster) -> (left: TernEndpoint?, right: TernEndpoint?) {
+        if let conversation = conversation { return (conversation.left, conversation.right) }
+        let candidates = (roster.active + roster.idle.filter(\.open)).prefix(2).map { TernEndpoint(pane: $0.pane, subagent: nil) }
+        return (candidates.first, candidates.dropFirst().first)
+    }
+
+    /// An avatar over a soft glow in its color; the glow swells while it sends or receives.
+    @ViewBuilder
+    private func wing(_ endpoint: TernEndpoint?, _ roster: TernRoster) -> some View {
+        let hue = endpoint.map(roster.hue) ?? crewHue
+        let mood = endpoint.map(roster.mood) ?? (offline ? .offline : .idle)
+        let speaking = endpoint.map { !reduceMotion && traffic.speaking($0) } ?? false
+        let listening = endpoint.map { !reduceMotion && traffic.listening($0) } ?? false
+        let lit = speaking || listening
+        let awake = mood == .working || mood == .waiting
+        ZStack {
+            Circle()
+                .fill(RadialGradient(colors: [hue.opacity(lit ? 0.55 : awake ? 0.3 : 0.12), hue.opacity(0)],
+                                     center: .center, startRadius: 0, endRadius: avatarSize))
+                .frame(width: avatarSize * 2, height: avatarSize * 2)
+                .scaleEffect(lit ? 1.25 : 1)
+            AgentAvatar(hue: hue, mood: mood, speaking: speaking, listening: listening, size: avatarSize)
+        }
+        .frame(width: avatarSize, height: avatarSize)
+        .animation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.6), value: lit)
+        .id(endpoint)
+        .transition(.opacity.combined(with: .scale(scale: 0.6)))
+    }
+
+    private func status(_ roster: TernRoster, _ pair: (left: TernEndpoint?, right: TernEndpoint?)) -> String {
         if !store.isRunning { return "Watcher unavailable" }
-        return "\(roster.active.count) working · \(roster.openCount) open agents"
+        let working = "\(roster.active.count) working"
+        guard let left = pair.left, let right = pair.right else { return working }
+        return "\(roster.fullName(left)) and \(roster.fullName(right)), \(working)"
+    }
+}
+
+/// Hairline just inside the collapsed notch's bottom edge, shading from the left agent's color to the
+/// right one's. While a fresh message is alive, a comet in the sender's color runs along it toward the
+/// recipient, passing under the camera. A timeline runs only while a comet is alive; Reduce Motion leaves the line.
+private struct EdgeTrace: View {
+    struct Comet {
+        let started: Date
+        /// From the left participant to the right one.
+        let forward: Bool
+        let color: Color
+    }
+
+    let comets: [Comet]
+    let leftHue: Color
+    let rightHue: Color
+    let reduceMotion: Bool
+
+    var body: some View {
+        ZStack {
+            Canvas { context, size in
+                let y = size.height - 1.5
+                var line = Path()
+                line.move(to: CGPoint(x: 0, y: y))
+                line.addLine(to: CGPoint(x: size.width, y: y))
+                let shading = GraphicsContext.Shading.linearGradient(
+                    Gradient(stops: [.init(color: leftHue.opacity(0), location: 0), .init(color: leftHue.opacity(0.55), location: 0.2),
+                                     .init(color: rightHue.opacity(0.55), location: 0.8), .init(color: rightHue.opacity(0), location: 1)]),
+                    startPoint: CGPoint(x: 0, y: y), endPoint: CGPoint(x: size.width, y: y))
+                context.stroke(line, with: shading, style: StrokeStyle(lineWidth: 1, lineCap: .round))
+            }
+            if !reduceMotion && !comets.isEmpty {
+                TimelineView(.animation(minimumInterval: 1.0 / 30)) { timeline in
+                    Canvas { context, size in
+                        for comet in comets {
+                            let progress = timeline.date.timeIntervalSince(comet.started) / TernTraffic.pulseDuration
+                            guard progress >= 0, progress < 1 else { continue }
+                            draw(&context, comet, size: size, progress: progress)
+                        }
+                    }
+                }
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private func draw(_ context: inout GraphicsContext, _ comet: Comet, size: CGSize, progress: Double) {
+        let y = size.height - 1.5
+        let travel = min(1, progress / 0.8)
+        let eased = travel * travel * (3 - 2 * travel)
+        let head = comet.forward ? eased * size.width : (1 - eased) * size.width
+        let tail = comet.forward ? max(0, head - size.width * 0.35) : min(size.width, head + size.width * 0.35)
+        let fade = progress < 0.8 ? 1 : (1 - progress) / 0.2
+        var trail = Path()
+        trail.move(to: CGPoint(x: tail, y: y))
+        trail.addLine(to: CGPoint(x: head, y: y))
+        let shading = GraphicsContext.Shading.linearGradient(
+            Gradient(colors: [comet.color.opacity(0), comet.color.opacity(0.95 * fade)]),
+            startPoint: CGPoint(x: tail, y: y), endPoint: CGPoint(x: head, y: y))
+        context.stroke(trail, with: shading, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+        context.fill(Path(ellipseIn: CGRect(x: head - 4, y: y - 4, width: 8, height: 8)), with: .color(comet.color.opacity(0.35 * fade)))
+        context.fill(Path(ellipseIn: CGRect(x: head - 1.6, y: y - 1.6, width: 3.2, height: 3.2)), with: .color(.white.opacity(fade)))
     }
 }
