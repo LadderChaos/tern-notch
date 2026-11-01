@@ -2,16 +2,23 @@
 
 ## [Unreleased]
 
+### Changed
+- Renamed the project to `TernNotch.xcodeproj` and the source folder to `TernNotch/`; the app shows the display name "Tern Notch" (bundle `local.tern.notch`, product `TernNotch`, unsandboxed, no Dock icon)
+
+### Removed
+- Legacy boring.notch fork sources and assets, `BoringNotchXPCHelper/`, `mediaremote-adapter/`, `Configuration/` tooling, the unused `Info.plist` and entitlements, and the stale SwiftPM `Package.resolved`; the app has no package dependencies
+
 ### Added
+- Pixel-art interface (`PixelKit.swift`): bundled Departure Mono pixel font (SIL OFL 1.1), stepped-corner boxes, chips, and bubbles, 9 × 9 pixel icons and robot avatars, a pixel switch and button style, banded colors, dithered glows, and cell-based comets and ripples at 15 fps; no SF Symbols or system fonts. The notch outline and its drop shadow stay smooth to match the camera housing
 - Standalone Tern Notch app with a live ternwatch NDJSON stream, drawn as a black notch silhouette attached to the camera housing at the physical screen top (a matching notch over the menu bar on displays without one). It has no menu bar or Dock icon: quit with the power button in the open notch's header, or Cmd-Q while the notch has keyboard focus
-- Symmetric collapsed notch: one agent in each wing at all times (the shown conversation's pair, otherwise the first two working or idle agents, with a crew avatar filling an empty wing), each over a soft glow in its color. A hairline along the bottom edge joins the pair's colors; a fresh message runs along it as a comet from sender to recipient while their glows swell
+- Symmetric collapsed notch: one agent in each wing at all times (the shown conversation's pair, otherwise the first two working or idle agents, with a crew avatar filling an empty wing), each over a dithered glow in its color. No line joins the wings; a fresh message animates the robots instead: the sender hops and flares its antenna, the recipient's eyes widen, and both glows brighten
 - Hover to open: after a short dwell the notch unfolds without activating the app or taking keyboard focus, then folds about half a second after the pointer leaves. A click inside (needed to type in the composer) pins it and gives it focus. Clicking the collapsed notch opens it pinned
 - Expanded notch (about 820 × 520 points, limited to the screen) laid out as two agents in conversation: a mirrored header with each agent's face, name, and reported intent, joined by a line a comet crosses from sender to recipient when a new message arrives; below it a mirrored transcript, oldest first, that scrolls to new messages, with the left agent's bubbles on the left and the right agent's on the right, each in its color
 - Conversation switcher strip: one chip per recent agent pair (both faces, names, and message count, newest first; new messages make it glow briefly). Click a chip to pin that conversation in both notch states, or **Live** to follow the latest. The agent who sent the first loaded message stays on the left
 - **Subagents** switch in the open header, off by default and kept between launches. Off: conversations are between top-level panes only. On: subagents take part on their own, each in a color derived from a stable hash of its name and always different from its parent's. With no conversations left, the empty state says how many subagent messages are hidden
-- Agent faces show only reported state: awake and occasionally blinking or wiggling the antenna while working, tilting the antenna and glancing aside while waiting on subagents, eyes closed while idle, a crossed-out bot when closed; the sender hops and the recipient's eyes widen while a fresh message travels
+- Agent faces are one-color 9 × 9 pixel blob robots with eye and mouth holes: awake and occasionally blinking or flipping the antenna while working, turning the antenna and glancing aside while waiting on subagents, dim with eyes closed while idle, dim with × eyes when closed, orange when offline; the sender hops one pixel and flares its antenna tip, and the recipient's eyes widen while a fresh message travels
 - Agent detail (click a face in the conversation header) with Focus, Copy pane ID, the agent's exchanges, and a composer; message detail (click a bubble) with the full text, Copy, and jumps to the sender or recipient; Esc steps back from message to agent to pinned conversation, then folds the notch
-- **Message** picker in the conversation strip opens any available agent's composer, including agents with no conversation; selecting an agent focuses the message field, and closed panes are disabled
+- **Message** in the conversation strip opens a pixel list of every agent (robot, name, state; working first) in place of the conversation; choosing one opens its composer with the field focused, closed panes are disabled, and Esc or **Message** closes the list
 - Comets and glows run only for newly observed traffic, never for loaded history or delivery updates, stop when nothing is arriving, and turn off with Reduce Motion
 - Per-session context window size (258k for Codex, 200k default)
 - Agent-colored dots in the collapsed notch view
