@@ -34,44 +34,6 @@ enum PixelArt {
         return Color(nsColor: mixed)
     }
 
-    /// Row of `cell`-sized squares along `y`, banded from `left` to `right`, its two ends dithered.
-    static func drawBand(_ context: inout GraphicsContext, width: CGFloat, y: CGFloat, left: Color, right: Color,
-                         cell: CGFloat = 2, opacity: Double = 0.6) {
-        let cells = Int(width / cell)
-        guard cells > 0 else { return }
-        let bands = 4
-        for index in 0..<cells {
-            let edge = min(index, cells - 1 - index)
-            // Ends fade by dropping every other cell, then every second one.
-            if edge < 3 && index % 2 == 1 { continue }
-            if edge < 6 && edge >= 3 && index % 3 == 2 { continue }
-            let band = min(bands - 1, index * bands / cells)
-            let color = mix(left, right, Double(band) / Double(bands - 1))
-            context.fill(Path(CGRect(x: CGFloat(index) * cell, y: y, width: cell, height: cell)), with: .color(color.opacity(opacity)))
-        }
-    }
-
-    /// A comet of whole cells: a white head and a trail in `color` that thins out in steps.
-    /// `head` is in points along the row; `forward` means it travels toward increasing x.
-    static func drawComet(_ context: inout GraphicsContext, head: CGFloat, y: CGFloat, forward: Bool, color: Color,
-                          fade: Double, length: Int = 10, cell: CGFloat = 2) {
-        let headCell = (head / cell).rounded(.down)
-        let direction: CGFloat = forward ? -1 : 1
-        for index in 0..<length {
-            let x = (headCell + direction * CGFloat(index)) * cell
-            // Solid near the head, then every other cell, then every third.
-            if index >= length / 2 && index % 2 == 1 { continue }
-            if index >= length * 3 / 4 && index % 3 != 0 { continue }
-            let alpha = index == 0 ? 1 : 0.9 - 0.6 * Double(index) / Double(length)
-            let fill: Color = index == 0 ? .white : color
-            context.fill(Path(CGRect(x: x, y: y, width: cell, height: cell)), with: .color(fill.opacity(alpha * fade)))
-        }
-        // A one-cell flare above and below the head.
-        let x = headCell * cell
-        context.fill(Path(CGRect(x: x, y: y - cell, width: cell, height: cell)), with: .color(color.opacity(0.6 * fade)))
-        context.fill(Path(CGRect(x: x, y: y + cell, width: cell, height: cell)), with: .color(color.opacity(0.6 * fade)))
-    }
-
     /// Stair offsets for a convex quarter circle of `steps` stairs: entry `i` is how far row `i`
     /// (counted from the outer edge) is inset, in stairs. Row 0 is always fully inset, so even a
     /// one-stair corner cuts its pixel.
@@ -291,23 +253,31 @@ struct PixelHalo: View {
 }
 
 /// Agent avatar: a one-color 9 × 9 pixel blob robot in the agent's identity color, its eyes and mouth
-/// cut out as holes. Working robots blink or flip their antenna now and then; orchestrators waiting
-/// on subagents tip the antenna and glance aside; idle robots close their eyes and dim; closed panes
-/// show × eyes. While a fresh message travels, the sender hops one pixel and its antenna tip flares,
-/// and the recipient's eyes widen. Reduce Motion stops all of this motion. Each robot pixel is a
-/// whole number of points.
+/// cut out as holes. Working robots blink or flip their antenna now and then; minimized wings opt
+/// into a continuous pixel bob and antenna cycle. Orchestrators waiting on subagents tip the antenna
+/// and glance aside; idle robots close their eyes and dim; closed panes show × eyes. While a fresh
+/// message travels, the sender hops one pixel and its antenna tip flares, and the recipient's eyes
+/// widen. Reduce Motion stops all of this motion. Each robot pixel is a whole number of points.
 struct AgentAvatar: View {
     let hue: Color
     let mood: AgentMood
     var speaking = false
     var listening = false
     var size: CGFloat = 20
+    var continuousWorking = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var blinking = false
     @State private var flipped = false
 
+    private enum WorkingAnimation: Hashable { case none, occasional, continuous }
+
+    private var workingAnimation: WorkingAnimation {
+        guard mood == .working && !reduceMotion else { return .none }
+        return continuousWorking ? .continuous : .occasional
+    }
+
     var body: some View {
-        let lively = mood == .working && !reduceMotion
+        let animation = workingAnimation
         let unit = max(1, (size / 9).rounded(.down))
         Canvas { context, canvas in
             let origin = CGPoint(x: ((canvas.width - 9 * unit) / 2).rounded(.down),
@@ -319,8 +289,22 @@ struct AgentAvatar: View {
             context.fill(path, with: .color(color))
         }
         .frame(width: size, height: size)
-        .task(id: lively) {
-            guard lively else { blinking = false; flipped = false; return }
+        // Move the whole canvas so the antenna and feet stay intact at the smallest wing size.
+        // Fresh-message poses take priority over the status bob.
+        .offset(y: animation == .continuous && flipped && !speaking && !listening ? unit : 0)
+        .task(id: animation) {
+            blinking = false
+            flipped = false
+            guard animation != .none else { return }
+            if animation == .continuous {
+                while !Task.isCancelled {
+                    do { try await Task.sleep(for: .milliseconds(450)) }
+                    catch { return }
+                    if Task.isCancelled { return }
+                    flipped.toggle()
+                }
+                return
+            }
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(Double.random(in: 2.4...5.0)))
                 if Task.isCancelled { break }

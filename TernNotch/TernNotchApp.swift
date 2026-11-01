@@ -458,8 +458,8 @@ private struct NotchRootView: View {
 /// Collapsed notch content, symmetric around the camera: one agent in each wing. The pair is the shown
 /// conversation (pinned, or the latest), on the same sides as in the open transcript; without any
 /// conversation it is the first two working agents, then idle ones. An empty wing holds a crew avatar.
-/// A fresh message animates the pair itself: the sender hops and flares its antenna, the recipient's
-/// eyes widen, and both glows brighten.
+/// Working robots continuously bob and flip their antenna; idle robots stay still. A fresh message
+/// takes priority: the sender hops and flares its antenna, the recipient's eyes widen, and both glows brighten.
 private struct CollapsedHeader: View {
     @ObservedObject var store: TernStreamStore
     @ObservedObject var traffic: TernTraffic
@@ -516,7 +516,8 @@ private struct CollapsedHeader: View {
         ZStack {
             PixelHalo(color: hue, level: lit ? 1 : awake ? 0.55 : 0.2, radius: lit ? 9 : 7)
                 .frame(width: avatarSize * 2, height: avatarSize * 2)
-            AgentAvatar(hue: hue, mood: mood, speaking: speaking, listening: listening, size: avatarSize)
+            AgentAvatar(hue: hue, mood: mood, speaking: speaking, listening: listening, size: avatarSize,
+                        continuousWorking: true)
         }
         .frame(width: avatarSize, height: avatarSize)
         .id(endpoint)

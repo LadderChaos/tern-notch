@@ -69,7 +69,7 @@ enum AgentColors {
     }
 }
 
-/// Identity color shared by an agent's avatar, bubbles, chips, and comets. A subagent (non-empty
+/// Identity color shared by an agent's avatar, bubbles, and chips. A subagent (non-empty
 /// name) gets a color distinct from its parent's.
 func agentHue(_ pane: UInt64, subagent: String? = nil) -> Color {
     guard let subagent = subagent, !subagent.isEmpty else { return AgentColors.color(pane) }
@@ -272,10 +272,6 @@ final class TernTraffic: ObservableObject {
     func conversationID(of pulse: TrafficPulse) -> TernConversation.ID? {
         TernConversation.id(TernEndpoint(pane: pulse.from, subagent: pulse.fromSubagent),
                             TernEndpoint(pane: pulse.to, subagent: pulse.toSubagent), subagents: showSubagents)
-    }
-
-    func pulses(in id: TernConversation.ID) -> [TrafficPulse] {
-        pulses.filter { conversationID(of: $0) == id }
     }
 
     /// A fresh message from this endpoint is in flight. Pulses expire, so this is finite.
@@ -661,28 +657,17 @@ struct TernView: View {
         }
     }
 
-    /// The two participants mirrored around a link line; a comet crosses it while a fresh message
-    /// of this conversation travels from sender to recipient.
+    /// The two participants mirrored around the conversation's message count.
     private func pairHeader(_ conversation: TernConversation, _ roster: TernRoster) -> some View {
-        let comets = traffic.pulses(in: conversation.id).map { pulse -> LinkLine.Comet in
-            let sender = TernEndpoint(pane: pulse.from, subagent: pulse.fromSubagent)
-            return LinkLine.Comet(started: pulse.started, forward: sender == conversation.left,
-                                  color: pulse.failed ? Color.red : roster.hue(sender))
-        }
         let count = conversation.entries.count
         return HStack(spacing: 10) {
             participant(conversation.left, roster, leading: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            VStack(spacing: 2) {
-                LinkLine(comets: comets, leftHue: roster.hue(conversation.left), rightHue: roster.hue(conversation.right),
-                         reduceMotion: reduceMotion)
-                    .frame(height: 22)
-                Text("\(count) message\(count == 1 ? "" : "s")")
-                    .font(.pixel())
-                    .foregroundStyle(Color.white.opacity(0.38))
-                    .lineLimit(1)
-            }
-            .frame(width: 120)
+            Text("\(count) message\(count == 1 ? "" : "s")")
+                .font(.pixel())
+                .foregroundStyle(Color.white.opacity(0.38))
+                .lineLimit(1)
+                .frame(width: 120)
             participant(conversation.right, roster, leading: false)
                 .frame(maxWidth: .infinity, alignment: .trailing)
         }
@@ -1269,93 +1254,6 @@ enum AgentMood: Equatable {
     case idle
     case closed
     case offline
-}
-
-/// The line between the two participants in the open header: a dotted band of cells from the left
-/// participant's color to the right one's. While a fresh message of the shown conversation is alive,
-/// a cell comet in the sender's color crosses it toward the recipient and lands in a square ripple.
-/// A stepped timeline runs only while a comet is alive; Reduce Motion leaves the still line.
-private struct LinkLine: View {
-    struct Comet {
-        let started: Date
-        /// From the left participant to the right one.
-        let forward: Bool
-        let color: Color
-    }
-
-    let comets: [Comet]
-    let leftHue: Color
-    let rightHue: Color
-    let reduceMotion: Bool
-
-    private let cell: CGFloat = 2
-    private let inset: CGFloat = 4
-
-    var body: some View {
-        ZStack {
-            Canvas { context, size in
-                context.translateBy(x: inset, y: 0)
-                PixelArt.drawBand(&context, width: size.width - 2 * inset, y: lineY(size), left: leftHue, right: rightHue,
-                                  cell: cell, opacity: 0.5)
-            }
-            if !reduceMotion && !comets.isEmpty {
-                TimelineView(.animation(minimumInterval: 1.0 / 15)) { timeline in
-                    Canvas { context, size in
-                        for comet in comets {
-                            let progress = timeline.date.timeIntervalSince(comet.started) / TernTraffic.pulseDuration
-                            guard progress >= 0, progress < 1 else { continue }
-                            draw(&context, comet, size: size, progress: progress)
-                        }
-                    }
-                }
-            }
-        }
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
-    }
-
-    /// Top of the line's cell row, on a whole point so cells stay on the pixel grid.
-    private func lineY(_ size: CGSize) -> CGFloat {
-        (size.height / 2 - cell / 2).rounded(.down)
-    }
-
-    private func draw(_ context: inout GraphicsContext, _ comet: Comet, size: CGSize, progress: Double) {
-        let y = lineY(size)
-        let left = inset
-        let right = ((size.width - inset) / cell).rounded(.down) * cell - cell
-        let start = comet.forward ? left : right
-        let end = comet.forward ? right : left
-        if progress < 0.3 {
-            drawRipple(&context, x: start, y: y, color: comet.color, progress: progress / 0.3 * 0.6)
-        }
-        let travel = min(1, progress / 0.72)
-        if travel < 1 {
-            let eased = travel * travel * (3 - 2 * travel)
-            PixelArt.drawComet(&context, head: start + (end - start) * eased, y: y, forward: comet.forward,
-                               color: comet.color, fade: 1, cell: cell)
-        }
-        if progress > 0.62 {
-            drawRipple(&context, x: end, y: y, color: comet.color, progress: (progress - 0.62) / 0.38)
-        }
-    }
-
-    /// Square ring of cells around the cell at (`x`, `y`), corners cut, that grows one cell per step
-    /// and fades in steps.
-    private func drawRipple(_ context: inout GraphicsContext, x: CGFloat, y: CGFloat, color: Color, progress: Double) {
-        let step = min(3, max(0, Int(progress * 4)))
-        let ring = step + 1
-        let shading = GraphicsContext.Shading.color(color.opacity(0.85 * (1 - Double(step) / 4)))
-        let originX = (x / cell).rounded(.down) * cell
-        for dx in -ring...ring {
-            for dy in -ring...ring {
-                let edge = max(abs(dx), abs(dy)) == ring
-                let corner = abs(dx) == ring && abs(dy) == ring
-                guard edge && !corner else { continue }
-                let rect = CGRect(x: originX + CGFloat(dx) * cell, y: y + CGFloat(dy) * cell, width: cell, height: cell)
-                context.fill(Path(rect), with: shading)
-            }
-        }
-    }
 }
 
 /// Square-ended bar: a dim track and a solid fill that grows in whole 2-point cells.
