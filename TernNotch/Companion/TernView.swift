@@ -172,6 +172,11 @@ struct TernConversation: Identifiable {
     let right: TernEndpoint
     /// Oldest to newest; never empty.
     fileprivate(set) var entries: [TrafficEntry]
+    fileprivate(set) var groups: [TrafficGroup] = []
+
+    var countLabel: String {
+        "\(groups.count) message\(groups.count == 1 ? "" : "s")"
+    }
     /// Position of the latest message in the traffic list; orders conversations newest first.
     fileprivate var latestIndex: Int
 
@@ -209,7 +214,41 @@ struct TernConversation: Identifiable {
                 conversations.append(TernConversation(id: id, left: from, right: to, entries: [entry], latestIndex: index))
             }
         }
+        for index in conversations.indices {
+            conversations[index].groups = TrafficGroup.group(conversations[index].entries)
+        }
         return (conversations.sorted { $0.latestIndex > $1.latestIndex }, hidden)
+    }
+}
+
+/// A presentation group only: every original receipt stays in the traffic and agent lists.
+struct TrafficGroup: Identifiable {
+    var id: TrafficEntry.ID { root.id }
+    let root: TrafficEntry
+    var receipts: [TrafficEntry]
+
+    static func group(_ entries: [TrafficEntry]) -> [TrafficGroup] {
+        var roots: [UInt64: TrafficEntry] = [:]
+        for entry in entries where entry.item.repeatOf == nil {
+            if let id = entry.item.id { roots[id] = entry }
+        }
+        var groups: [TrafficGroup] = []
+        var positions: [TrafficEntry.ID: Int] = [:]
+        for entry in entries {
+            var root = entry
+            if let repeatOf = entry.item.repeatOf, let candidate = roots[repeatOf],
+               TernEndpoint(candidate.item.from) == TernEndpoint(entry.item.from),
+               TernEndpoint(candidate.item.to) == TernEndpoint(entry.item.to) {
+                root = candidate
+            }
+            if let index = positions[root.id] {
+                groups[index].receipts.append(entry)
+            } else {
+                positions[root.id] = groups.count
+                groups.append(TrafficGroup(root: root, receipts: [entry]))
+            }
+        }
+        return groups
     }
 }
 
@@ -234,7 +273,7 @@ final class TernTraffic: ObservableObject {
     /// Current value of the Subagents filter (`TernPreferences.showSubagents`).
     private(set) var showSubagents = false
 
-    private var observed: Set<TrafficEntry.ID> = []
+    private var observed: [TrafficEntry.ID: Int64] = [:]
     private var hasBaseline = false
     private var observingSince = Date()
     private var expiry: DispatchWorkItem?
@@ -308,10 +347,16 @@ final class TernTraffic: ObservableObject {
         let now = Date()
         var occurrences: [TrafficKey: Int] = [:]
         let next = messages.enumerated().map { offset, item in
-            let key = TrafficKey(item)
-            let occurrence = occurrences[key, default: 0]
-            occurrences[key] = occurrence + 1
-            return TrafficEntry(id: .init(key: key, occurrence: occurrence), item: item, offset: offset)
+            let id: TrafficEntry.ID
+            if let sequence = item.id {
+                id = .receipt(sequence)
+            } else {
+                let key = TrafficKey(item)
+                let occurrence = occurrences[key, default: 0]
+                occurrences[key] = occurrence + 1
+                id = .legacy(key: key, occurrence: occurrence)
+            }
+            return TrafficEntry(id: id, item: item, offset: offset)
         }.sorted {
             let left = $0.item.sentMs ?? $0.item.deliveredMs ?? Int64.min
             let right = $1.item.sentMs ?? $1.item.deliveredMs ?? Int64.min
@@ -322,7 +367,8 @@ final class TernTraffic: ObservableObject {
             let nowMs = now.timeIntervalSince1970 * 1000
             let earliest = max(observingSince.timeIntervalSince1970 * 1000, nowMs - 5000)
             fresh = next.filter { entry in
-                guard !observed.contains(entry.id), let sent = entry.item.sentMs else { return false }
+                guard observed[entry.id] == nil, entry.item.repeatOf == nil,
+                      let sent = entry.item.sentMs else { return false }
                 return Double(sent) >= earliest && Double(sent) <= nowMs + 1000
             }
         } else if !messages.isEmpty || hasAgents {
@@ -332,7 +378,8 @@ final class TernTraffic: ObservableObject {
         }
         // Retain recently seen identities across transient snapshot omissions.
         let recentCutoff = Int64((now.timeIntervalSince1970 - 6) * 1000)
-        observed = Set(next.map(\.id)).union(observed.filter { ($0.key.sent ?? Int64.min) >= recentCutoff })
+        observed = observed.filter { $0.value >= recentCutoff }
+        for entry in next { observed[entry.id] = entry.item.sentMs ?? entry.item.deliveredMs ?? Int64.min }
         if Self.changed(entries, next) { entries = next }
         guard !fresh.isEmpty else { return }
         let live = pulses.filter { now.timeIntervalSince($0.started) < Self.pulseDuration }
@@ -354,6 +401,11 @@ final class TernTraffic: ObservableObject {
         return zip(old, new).contains { left, right in
             left.id != right.id || left.item.deliveredMs != right.item.deliveredMs || left.item.failed != right.item.failed
                 || left.item.outcome != right.item.outcome || left.item.replied != right.item.replied
+                || left.item.repeatOf != right.item.repeatOf || left.item.sentMs != right.item.sentMs
+                || left.item.text != right.item.text || left.item.kind != right.item.kind
+                || left.item.reply != right.item.reply || left.item.deliveryObservable != right.item.deliveryObservable
+                || TernEndpoint(left.item.from) != TernEndpoint(right.item.from)
+                || TernEndpoint(left.item.to) != TernEndpoint(right.item.to)
         }
     }
 
@@ -378,6 +430,7 @@ final class TernViewState: ObservableObject {
     @Published var pinned: TernConversation.ID?
     @Published var selectedPane: UInt64?
     @Published var selectedMessage: TrafficEntry.ID?
+    @Published var expandedReceipts: Set<TrafficEntry.ID> = []
     @Published var draft = ""
     /// The Message recipient list is open over the detail area.
     @Published var pickingRecipient = false
@@ -408,7 +461,7 @@ struct TernView: View {
 
     /// Bubbles never run wider than this share of the transcript, so the two sides stay apart.
     private let bubbleShare: CGFloat = 0.62
-    /// Newest messages kept in the transcript; agent details list each agent's exchanges.
+    /// Newest groups shown; disclosure preserves every original message within each group.
     private let transcriptLimit = 150
     /// Conversation chips in the switcher, newest first (plus the pinned one if older).
     private let chipLimit = 12
@@ -550,7 +603,7 @@ struct TernView: View {
         let leftHue = roster.hue(conversation.left)
         let rightHue = roster.hue(conversation.right)
         let pair = LinearGradient(gradient: PixelArt.bands(leftHue, rightHue), startPoint: .leading, endPoint: .trailing)
-        let count = conversation.entries.count
+        let count = conversation.groups.count
         let names = "\(roster.fullName(conversation.left)) and \(roster.fullName(conversation.right))"
         return Button { show(conversation.id) } label: {
             HStack(spacing: 5) {
@@ -583,8 +636,8 @@ struct TernView: View {
             .contentShape(PixelBox(1))
         }
         .buttonStyle(.plain)
-        .help("\(names) · \(count) message\(count == 1 ? "" : "s")\(pinned ? " · pinned" : "")")
-        .accessibilityLabel("Conversation between \(names), \(count) message\(count == 1 ? "" : "s")")
+        .help("\(names) · \(conversation.countLabel)\(pinned ? " · pinned" : "")")
+        .accessibilityLabel("Conversation between \(names), \(conversation.countLabel)")
         .accessibilityHint(pinned ? "Pinned" : "Pins this conversation")
         .accessibilityAddTraits(pinned ? .isSelected : [])
     }
@@ -659,11 +712,10 @@ struct TernView: View {
 
     /// The two participants mirrored around the conversation's message count.
     private func pairHeader(_ conversation: TernConversation, _ roster: TernRoster) -> some View {
-        let count = conversation.entries.count
         return HStack(spacing: 10) {
             participant(conversation.left, roster, leading: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Text("\(count) message\(count == 1 ? "" : "s")")
+            Text(conversation.countLabel)
                 .font(.pixel())
                 .foregroundStyle(Color.white.opacity(0.38))
                 .lineLimit(1)
@@ -721,14 +773,14 @@ struct TernView: View {
 
     /// Oldest to newest, scrolled to the newest message on open and on each arrival.
     private func transcript(_ conversation: TernConversation, _ roster: TernRoster) -> some View {
-        let entries = Array(conversation.entries.suffix(transcriptLimit))
-        let newest = conversation.latest.id
+        let groups = conversation.groups.suffix(transcriptLimit)
+        let newest = conversation.groups[conversation.groups.count - 1].id
         return ScrollViewReader { proxy in
             ScrollView {
-                VStack(spacing: 6) {
-                    ForEach(entries) { entry in
-                        bubble(entry, conversation, roster)
-                            .id(entry.id)
+                LazyVStack(spacing: 6) {
+                    ForEach(groups) { group in
+                        receiptGroup(group, conversation, roster)
+                            .id(group.id)
                             .transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity), removal: .opacity))
                     }
                 }
@@ -744,6 +796,43 @@ struct TernView: View {
             }
         }
         .frame(maxHeight: .infinity)
+    }
+
+    private func receiptGroup(_ group: TrafficGroup, _ conversation: TernConversation, _ roster: TernRoster) -> some View {
+        let expanded = state.expandedReceipts.contains(group.id)
+        let leading = TernEndpoint(group.root.item.from) == conversation.left
+        return LazyVStack(spacing: 5) {
+            if group.receipts.count > 1 {
+                repeatDisclosure(group)
+                    .frame(maxWidth: .infinity, alignment: leading ? .leading : .trailing)
+            }
+            if expanded && group.receipts.count > 1 {
+                ForEach(group.receipts) { entry in bubble(entry, conversation, roster) }
+            } else {
+                bubble(group.root, conversation, roster)
+            }
+        }
+    }
+
+    private func repeatDisclosure(_ group: TrafficGroup) -> some View {
+        let expanded = state.expandedReceipts.contains(group.id)
+        return Button {
+            if expanded { state.expandedReceipts.remove(group.id) }
+            else { state.expandedReceipts.insert(group.id) }
+        } label: {
+            HStack(spacing: 5) {
+                PixelIcon(glyph: .chevronUp)
+                    .rotationEffect(.degrees(expanded ? 0 : 180))
+                Text("Possible repeat · \(group.receipts.count) copies")
+                    .font(.pixel())
+            }
+            .foregroundStyle(Color.white.opacity(0.65))
+            .padding(.vertical, 3)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(expanded ? "Collapse original messages" : "Show every original message; click a message for full text")
+        .accessibilityValue(expanded ? "Expanded" : "Collapsed")
     }
 
     /// One message as a mirrored chat bubble: the left participant's messages hug the left edge and
@@ -793,7 +882,7 @@ struct TernView: View {
     private func agentDetail(_ agent: TernAgent, _ roster: TernRoster) -> some View {
         let hue = agentHue(agent.pane)
         let endpoint = TernEndpoint(pane: agent.pane)
-        let related = traffic.entries.filter { $0.item.from.pane == agent.pane || $0.item.to.pane == agent.pane }
+        let related = TrafficGroup.group(traffic.entries.filter { $0.item.from.pane == agent.pane || $0.item.to.pane == agent.pane })
         return VStack(alignment: .leading, spacing: 9) {
             HStack(spacing: 8) {
                 backButton
@@ -969,8 +1058,8 @@ struct TernView: View {
 
     // MARK: Exchanges
 
-    private func exchangeList(_ entries: [TrafficEntry], _ roster: TernRoster, empty: String) -> some View {
-        let recent = Array(entries.suffix(80).reversed())
+    private func exchangeList(_ groups: [TrafficGroup], _ roster: TernRoster, empty: String) -> some View {
+        let recent = groups.suffix(80).reversed()
         return ScrollView {
             LazyVStack(alignment: .leading, spacing: 5) {
                 if recent.isEmpty {
@@ -980,8 +1069,8 @@ struct TernView: View {
                         .padding(.vertical, 10)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                ForEach(recent) { entry in
-                    exchangeRow(entry, roster)
+                ForEach(recent) { group in
+                    exchangeGroup(group, roster)
                         .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .opacity))
                 }
             }
@@ -990,6 +1079,18 @@ struct TernView: View {
         }
         .scrollIndicators(.never)
         .frame(maxHeight: .infinity)
+    }
+
+    private func exchangeGroup(_ group: TrafficGroup, _ roster: TernRoster) -> some View {
+        let expanded = state.expandedReceipts.contains(group.id)
+        return LazyVStack(alignment: .leading, spacing: 5) {
+            if group.receipts.count > 1 { repeatDisclosure(group) }
+            if expanded && group.receipts.count > 1 {
+                ForEach(group.receipts.reversed()) { entry in exchangeRow(entry, roster) }
+            } else {
+                exchangeRow(group.root, roster)
+            }
+        }
     }
 
     /// One exchange in an agent's detail: the sender's face, "sender to recipient", and a speech bubble preview.
@@ -1291,7 +1392,10 @@ struct TrafficKey: Hashable {
 }
 
 struct TrafficEntry: Identifiable {
-    struct ID: Hashable { let key: TrafficKey; let occurrence: Int }
+    enum ID: Hashable {
+        case receipt(UInt64)
+        case legacy(key: TrafficKey, occurrence: Int)
+    }
     let id: ID
     let item: TernMessage
     let offset: Int

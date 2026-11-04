@@ -6,6 +6,8 @@
 - Renamed the project to `TernNotch.xcodeproj` and the source folder to `TernNotch/`; the app shows the display name "Tern Notch" (bundle `local.tern.notch`, product `TernNotch`, unsandboxed, no Dock icon)
 - Replaced the shared blob robot avatar with a 10 × 7 pixel space invader based on the supplied reference: paired antennae, hanging arms, inward feet, square eye holes, and a wide mouth opening. Agent identity colors, status expressions, and layout frames are preserved across all avatar surfaces
 - Collapsed-wing working invaders continuously alternate a one-art-pixel bob and paired antenna spread every 450 ms, independently of message traffic; idle invaders stay static, fresh-message reactions take priority, and Reduce Motion disables animation and message poses. Open-notch avatars keep their occasional working blink or antenna wiggle
+- Group ternwatch's possible-repeat messages in conversation transcripts and agent exchanges with a reversible **Possible repeat · N copies** disclosure. Counts show grouped messages. Keep the transcript's 150-group and agent exchanges' 80-group presentation limits with lazy rendering; every original in a displayed group remains accessible, including its existing timestamp, full text, and copy action
+- Accept optional `id` and `repeat_of` stream fields while preserving older watcher compatibility. Stable receipt identity prevents late send observations or repeat reclassification from replaying fresh-message reactions; presentation limits leave the loaded message data intact
 
 ### Removed
 - Expanded conversation header's connecting line and comet animation; participant speaking/listening reactions and traffic glows remain

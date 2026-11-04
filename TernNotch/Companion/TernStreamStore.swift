@@ -61,6 +61,26 @@ struct TernMessage: Decodable {
     let deliveryObservable: Bool
     let reply: Bool
     let replied: Bool
+    let id: UInt64?
+    let repeatOf: UInt64?
+
+    init(kind: String, from: TernNode, to: TernNode, text: String, sentMs: Int64?, deliveredMs: Int64?,
+         failed: Bool, outcome: String?, deliveryObservable: Bool, reply: Bool, replied: Bool,
+         id: UInt64? = nil, repeatOf: UInt64? = nil) {
+        self.kind = kind
+        self.from = from
+        self.to = to
+        self.text = text
+        self.sentMs = sentMs
+        self.deliveredMs = deliveredMs
+        self.failed = failed
+        self.outcome = outcome
+        self.deliveryObservable = deliveryObservable
+        self.reply = reply
+        self.replied = replied
+        self.id = id
+        self.repeatOf = repeatOf
+    }
 }
 
 final class TernStreamStore: ObservableObject {
